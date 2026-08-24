@@ -195,6 +195,8 @@ namespace nvhttp {
    */
   bool pin(std::string pin, std::string name);
 
+  bool arm_lola_pairing(std::string pin, std::string client_name);
+
   std::string request_otp(const std::string& passphrase, const std::string& deviceName);
 
   /**

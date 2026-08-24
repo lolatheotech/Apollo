@@ -8,6 +8,7 @@
 // standard includes
 #include <filesystem>
 #include <format>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <string>
@@ -64,6 +65,10 @@ namespace nvhttp {
   static std::string otp_passphrase;
   static std::string otp_device_name;
   static std::chrono::time_point<std::chrono::steady_clock> otp_creation_time;
+  static std::mutex lola_pairing_mutex;
+  static std::string lola_pairing_pin;
+  static std::string lola_pairing_client_name;
+  static std::chrono::time_point<std::chrono::steady_clock> lola_pairing_creation_time;
 
   class SunshineHTTPSServer: public SimpleWeb::ServerBase<SunshineHTTPS> {
   public:
@@ -779,6 +784,26 @@ namespace nvhttp {
 
           // Always return positive, attackers will fail in the next steps.
           getservercert(ptr->second, tree, crypto::rand(16));
+          return;
+        }
+
+        std::string armed_lola_pin;
+        {
+          std::lock_guard lock { lola_pairing_mutex };
+          const bool active = !lola_pairing_pin.empty() &&
+                              std::chrono::steady_clock::now() - lola_pairing_creation_time <= OTP_EXPIRE_DURATION;
+          const bool client_matches = lola_pairing_client_name.empty() ||
+                                      lola_pairing_client_name == ptr->second.client.name;
+          if (active && client_matches) {
+            armed_lola_pin = std::move(lola_pairing_pin);
+          }
+          if (!active || !armed_lola_pin.empty()) {
+            lola_pairing_pin.clear();
+            lola_pairing_client_name.clear();
+          }
+        }
+        if (!armed_lola_pin.empty()) {
+          getservercert(ptr->second, tree, armed_lola_pin);
           return;
         }
 
@@ -1768,6 +1793,17 @@ namespace nvhttp {
 
     ssl.join();
     tcp.join();
+  }
+
+  bool arm_lola_pairing(std::string pin, std::string client_name) {
+    if (pin.size() != 4 || !std::all_of(pin.begin(), pin.end(), [](unsigned char value) { return std::isdigit(value); })) {
+      return false;
+    }
+    std::lock_guard lock { lola_pairing_mutex };
+    lola_pairing_pin = std::move(pin);
+    lola_pairing_client_name = std::move(client_name);
+    lola_pairing_creation_time = std::chrono::steady_clock::now();
+    return true;
   }
 
   std::string request_otp(const std::string& passphrase, const std::string& deviceName) {
