@@ -1325,6 +1325,21 @@ namespace confighttp {
       bad_request(response, request, e.what());
     }
   }
+  void
+  getLolaPairingStatus(resp_https_t response, req_https_t request) {
+    if (!request->remote_endpoint().address().is_loopback()) {
+      response->write(SimpleWeb::StatusCode::client_error_forbidden);
+      return;
+    }
+    if (!authenticate(response, request)) return;
+    pt::ptree outputTree;
+    auto fingerprint = nvhttp::take_lola_pairing_fingerprint();
+    outputTree.put("status", fingerprint.empty() ? "PENDING" : "PAIRED");
+    if (!fingerprint.empty()) {
+      outputTree.put("certificateFingerprint", fingerprint);
+    }
+    send_response(response, outputTree);
+  }
   /**
    * @brief Reset the display device persistence.
    * @param response The HTTP response object.
@@ -1561,6 +1576,7 @@ namespace confighttp {
     server.resource["^/api/pin$"]["POST"] = savePin;
     server.resource["^/api/otp$"]["POST"] = getOTP;
     server.resource["^/api/lola/pairing$"]["POST"] = armLolaPairing;
+    server.resource["^/api/lola/pairing$"]["GET"] = getLolaPairingStatus;
     server.resource["^/api/apps$"]["GET"] = getApps;
     server.resource["^/api/apps$"]["POST"] = saveApp;
     server.resource["^/api/apps/reorder$"]["POST"] = reorderApps;

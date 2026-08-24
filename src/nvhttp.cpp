@@ -68,6 +68,8 @@ namespace nvhttp {
   static std::mutex lola_pairing_mutex;
   static std::string lola_pairing_pin;
   static std::string lola_pairing_client_name;
+  static std::string lola_pairing_client_unique_id;
+  static std::string lola_pairing_certificate_fingerprint;
   static std::chrono::time_point<std::chrono::steady_clock> lola_pairing_creation_time;
 
   class SunshineHTTPSServer: public SimpleWeb::ServerBase<SunshineHTTPS> {
@@ -628,6 +630,13 @@ namespace nvhttp {
         if (c == '(') c = '[';
         else if (c == ')') c = ']';
       }
+      {
+        std::lock_guard lock { lola_pairing_mutex };
+        if (!lola_pairing_client_unique_id.empty() && lola_pairing_client_unique_id == client.uniqueID) {
+          lola_pairing_certificate_fingerprint = util::hex(crypto::hash(client.cert)).to_string();
+          lola_pairing_client_unique_id.clear();
+        }
+      }
       named_cert_p->cert = std::move(client.cert);
       named_cert_p->uuid = uuid_util::uuid_t::generate().string();
       // If the device is the first one paired with the server, assign full permission.
@@ -796,6 +805,7 @@ namespace nvhttp {
                                       lola_pairing_client_name == ptr->second.client.name;
           if (active && client_matches) {
             armed_lola_pin = std::move(lola_pairing_pin);
+            lola_pairing_client_unique_id = ptr->second.client.uniqueID;
           }
           if (!active || !armed_lola_pin.empty()) {
             lola_pairing_pin.clear();
@@ -1802,8 +1812,15 @@ namespace nvhttp {
     std::lock_guard lock { lola_pairing_mutex };
     lola_pairing_pin = std::move(pin);
     lola_pairing_client_name = std::move(client_name);
+    lola_pairing_client_unique_id.clear();
+    lola_pairing_certificate_fingerprint.clear();
     lola_pairing_creation_time = std::chrono::steady_clock::now();
     return true;
+  }
+
+  std::string take_lola_pairing_fingerprint() {
+    std::lock_guard lock { lola_pairing_mutex };
+    return std::move(lola_pairing_certificate_fingerprint);
   }
 
   std::string request_otp(const std::string& passphrase, const std::string& deviceName) {
