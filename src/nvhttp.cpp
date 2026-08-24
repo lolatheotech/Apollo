@@ -67,7 +67,6 @@ namespace nvhttp {
   static std::chrono::time_point<std::chrono::steady_clock> otp_creation_time;
   static std::mutex lola_pairing_mutex;
   static std::string lola_pairing_pin;
-  static std::string lola_pairing_client_name;
   static std::string lola_pairing_client_unique_id;
   static std::string lola_pairing_certificate_fingerprint;
   static std::chrono::time_point<std::chrono::steady_clock> lola_pairing_creation_time;
@@ -801,15 +800,12 @@ namespace nvhttp {
           std::lock_guard lock { lola_pairing_mutex };
           const bool active = !lola_pairing_pin.empty() &&
                               std::chrono::steady_clock::now() - lola_pairing_creation_time <= OTP_EXPIRE_DURATION;
-          const bool client_matches = lola_pairing_client_name.empty() ||
-                                      lola_pairing_client_name == ptr->second.client.name;
-          if (active && client_matches) {
+          if (active) {
             armed_lola_pin = std::move(lola_pairing_pin);
             lola_pairing_client_unique_id = ptr->second.client.uniqueID;
           }
           if (!active || !armed_lola_pin.empty()) {
             lola_pairing_pin.clear();
-            lola_pairing_client_name.clear();
           }
         }
         if (!armed_lola_pin.empty()) {
@@ -1805,13 +1801,12 @@ namespace nvhttp {
     tcp.join();
   }
 
-  bool arm_lola_pairing(std::string pin, std::string client_name) {
+  bool arm_lola_pairing(std::string pin) {
     if (pin.size() != 4 || !std::all_of(pin.begin(), pin.end(), [](unsigned char value) { return std::isdigit(value); })) {
       return false;
     }
     std::lock_guard lock { lola_pairing_mutex };
     lola_pairing_pin = std::move(pin);
-    lola_pairing_client_name = std::move(client_name);
     lola_pairing_client_unique_id.clear();
     lola_pairing_certificate_fingerprint.clear();
     lola_pairing_creation_time = std::chrono::steady_clock::now();

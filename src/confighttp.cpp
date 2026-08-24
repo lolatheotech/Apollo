@@ -1311,8 +1311,7 @@ namespace confighttp {
       nlohmann::json inputTree = nlohmann::json::parse(ss.str());
       nlohmann::json outputTree;
       auto pin = inputTree.value("pin", "");
-      auto clientName = inputTree.value("clientName", "");
-      if (!nvhttp::arm_lola_pairing(std::move(pin), std::move(clientName))) {
+      if (!nvhttp::arm_lola_pairing(std::move(pin))) {
         throw std::runtime_error("Pairing PIN must contain exactly four digits");
       }
       outputTree["status"] = true;

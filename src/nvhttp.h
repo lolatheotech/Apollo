@@ -195,7 +195,7 @@ namespace nvhttp {
    */
   bool pin(std::string pin, std::string name);
 
-  bool arm_lola_pairing(std::string pin, std::string client_name);
+  bool arm_lola_pairing(std::string pin);
 
   std::string take_lola_pairing_fingerprint();
 
