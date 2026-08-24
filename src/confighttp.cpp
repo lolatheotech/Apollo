@@ -1304,20 +1304,19 @@ namespace confighttp {
       response->write(SimpleWeb::StatusCode::client_error_forbidden);
       return;
     }
-    if (!authenticate(response, request)) return;
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) return;
     std::stringstream ss;
     ss << request->content.rdbuf();
     try {
-      pt::ptree inputTree;
-      pt::ptree outputTree;
-      pt::read_json(ss, inputTree);
-      auto pin = inputTree.get<std::string>("pin");
-      auto clientName = inputTree.get<std::string>("clientName", "");
+      nlohmann::json inputTree = nlohmann::json::parse(ss.str());
+      nlohmann::json outputTree;
+      auto pin = inputTree.value("pin", "");
+      auto clientName = inputTree.value("clientName", "");
       if (!nvhttp::arm_lola_pairing(std::move(pin), std::move(clientName))) {
         throw std::runtime_error("Pairing PIN must contain exactly four digits");
       }
-      outputTree.put("status", true);
-      outputTree.put("message", "LoLa pairing armed");
+      outputTree["status"] = true;
+      outputTree["message"] = "LoLa pairing armed";
       send_response(response, outputTree);
     }
     catch (std::exception &e) {
@@ -1332,11 +1331,11 @@ namespace confighttp {
       return;
     }
     if (!authenticate(response, request)) return;
-    pt::ptree outputTree;
+    nlohmann::json outputTree;
     auto fingerprint = nvhttp::take_lola_pairing_fingerprint();
-    outputTree.put("status", fingerprint.empty() ? "PENDING" : "PAIRED");
+    outputTree["status"] = fingerprint.empty() ? "PENDING" : "PAIRED";
     if (!fingerprint.empty()) {
-      outputTree.put("certificateFingerprint", fingerprint);
+      outputTree["certificateFingerprint"] = fingerprint;
     }
     send_response(response, outputTree);
   }
