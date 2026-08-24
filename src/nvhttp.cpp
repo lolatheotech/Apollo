@@ -374,7 +374,8 @@ namespace nvhttp {
   void add_authorized_client(const p_named_cert_t& named_cert_p) {
     client_t &client = client_root;
     client.named_devices.push_back(named_cert_p);
-    cert_chain.add(named_cert_p);
+    auto cert_for_chain = named_cert_p;
+    cert_chain.add(cert_for_chain);
 
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
     system_tray::update_tray_paired(named_cert_p->name);
