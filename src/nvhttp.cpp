@@ -68,6 +68,7 @@ namespace nvhttp {
   static std::mutex lola_pairing_mutex;
   static std::string lola_pairing_pin;
   static std::string lola_pairing_client_unique_id;
+  static std::string lola_pairing_client_certificate_fingerprint;
   static std::string lola_pairing_certificate_fingerprint;
   static std::chrono::time_point<std::chrono::steady_clock> lola_pairing_creation_time;
 
@@ -633,10 +634,14 @@ namespace nvhttp {
       bool lola_authorized_client = false;
       {
         std::lock_guard lock { lola_pairing_mutex };
-        if (!lola_pairing_client_unique_id.empty() && lola_pairing_client_unique_id == client.uniqueID) {
-          lola_pairing_certificate_fingerprint = util::hex(crypto::hash(client.cert)).to_string();
+        const auto certificate_fingerprint = util::hex(crypto::hash(client.cert)).to_string();
+        if ((!lola_pairing_client_certificate_fingerprint.empty() &&
+             lola_pairing_client_certificate_fingerprint == certificate_fingerprint) ||
+            (!lola_pairing_client_unique_id.empty() && lola_pairing_client_unique_id == client.uniqueID)) {
+          lola_pairing_certificate_fingerprint = certificate_fingerprint;
           lola_authorized_client = true;
           lola_pairing_client_unique_id.clear();
+          lola_pairing_client_certificate_fingerprint.clear();
         }
       }
       named_cert_p->cert = std::move(client.cert);
@@ -811,6 +816,7 @@ namespace nvhttp {
           if (active) {
             armed_lola_pin = std::move(lola_pairing_pin);
             lola_pairing_client_unique_id = ptr->second.client.uniqueID;
+            lola_pairing_client_certificate_fingerprint = util::hex(crypto::hash(ptr->second.client.cert)).to_string();
           }
           if (!active || !armed_lola_pin.empty()) {
             lola_pairing_pin.clear();
@@ -1816,6 +1822,7 @@ namespace nvhttp {
     std::lock_guard lock { lola_pairing_mutex };
     lola_pairing_pin = std::move(pin);
     lola_pairing_client_unique_id.clear();
+    lola_pairing_client_certificate_fingerprint.clear();
     lola_pairing_certificate_fingerprint.clear();
     lola_pairing_creation_time = std::chrono::steady_clock::now();
     return true;
