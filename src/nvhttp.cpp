@@ -630,17 +630,24 @@ namespace nvhttp {
         if (c == '(') c = '[';
         else if (c == ')') c = ']';
       }
+      bool lola_authorized_client = false;
       {
         std::lock_guard lock { lola_pairing_mutex };
         if (!lola_pairing_client_unique_id.empty() && lola_pairing_client_unique_id == client.uniqueID) {
           lola_pairing_certificate_fingerprint = util::hex(crypto::hash(client.cert)).to_string();
+          lola_authorized_client = true;
           lola_pairing_client_unique_id.clear();
         }
       }
       named_cert_p->cert = std::move(client.cert);
       named_cert_p->uuid = uuid_util::uuid_t::generate().string();
       // If the device is the first one paired with the server, assign full permission.
-      if (client_root.named_devices.empty()) {
+      if (lola_authorized_client) {
+        // LoLa remote desktop clients need stream lifecycle and input access,
+        // but not server-command, clipboard, or file-transfer permissions.
+        named_cert_p->perm = static_cast<PERM>(static_cast<uint32_t>(PERM::_all_inputs) |
+                                               static_cast<uint32_t>(PERM::_all_actions));
+      } else if (client_root.named_devices.empty()) {
         named_cert_p->perm = PERM::_all;
       } else {
         named_cert_p->perm = PERM::_default;
