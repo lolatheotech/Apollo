@@ -648,10 +648,13 @@ namespace nvhttp {
       named_cert_p->uuid = uuid_util::uuid_t::generate().string();
       // If the device is the first one paired with the server, assign full permission.
       if (lola_authorized_client) {
-        // LoLa remote desktop clients need stream lifecycle and input access,
-        // but not server-command, clipboard, or file-transfer permissions.
+        // LoLa remote desktop clients need stream lifecycle, input, and
+        // text-clipboard access. Server-command and file-transfer permissions
+        // remain excluded.
         named_cert_p->perm = static_cast<PERM>(static_cast<uint32_t>(PERM::_all_inputs) |
-                                               static_cast<uint32_t>(PERM::_all_actions));
+                                               static_cast<uint32_t>(PERM::_all_actions) |
+                                               static_cast<uint32_t>(PERM::clipboard_set) |
+                                               static_cast<uint32_t>(PERM::clipboard_read));
       } else if (client_root.named_devices.empty()) {
         named_cert_p->perm = PERM::_all;
       } else {
