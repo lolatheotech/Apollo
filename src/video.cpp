@@ -6,6 +6,7 @@
 #include <atomic>
 #include <bitset>
 #include <list>
+#include <mutex>
 #include <deque>
 #include <thread>
 
@@ -483,6 +484,14 @@ namespace video {
 
   // Keep a reference counter to ensure the capture thread only runs when other threads have a reference to the capture thread
   using capture_thread_shared_t = safe::shared_t<capture_thread_async_ctx_t>;
+
+  // DXGI rejects a second enumeration probe while another capture group owns
+  // an active duplication session. Keep one stable display snapshot for the
+  // lifetime of the coordinated group set so every slot resolves against the
+  // same ordering without probing already-active outputs again.
+  std::mutex capture_group_displays_mutex;
+  std::vector<std::string> capture_group_display_names;
+  uint32_t active_capture_group_threads {0};
 
   auto capture_threads_async = []() {
     std::deque<capture_thread_shared_t> groups;
@@ -1189,22 +1198,33 @@ namespace video {
     std::vector<std::string> display_names;
     int display_p = -1;
     std::shared_ptr<platf::display_t> disp;
-    if (group_id == 0 && !proc::proc.display_name.empty()) {
+    const bool coordinated_capture = capture_ctxs.front().config.capture_group_count > 1;
+    std::string group_display_name;
+    if (!coordinated_capture && group_id == 0 && !proc::proc.display_name.empty()) {
       disp = platf::display(encoder.platform_formats->dev_type, proc::proc.display_name, capture_ctxs.front().config);
     }
     if (!disp) {
       // Each capture group owns one stable display slot. Re-enumeration keeps
       // that slot deterministic and fails closed if the requested display is absent.
-      refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+      if (coordinated_capture) {
+        std::lock_guard lock {capture_group_displays_mutex};
+        if (capture_group_display_names.empty()) {
+          capture_group_display_names = platf::display_names(encoder.platform_formats->dev_type);
+        }
+        display_names = capture_group_display_names;
+      } else {
+        refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+      }
       if (group_id >= display_names.size()) {
         BOOST_LOG(error) << "Capture group "sv << group_id
                          << " has no corresponding display"sv;
         return;
       }
       display_p = static_cast<int>(group_id);
-      disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+      group_display_name = display_names[display_p];
+      disp = platf::display(encoder.platform_formats->dev_type, group_display_name, capture_ctxs.front().config);
       if (disp && group_id == 0) {
-        proc::proc.display_name = display_names[display_p];
+        proc::proc.display_name = group_display_name;
       } else if (!disp) {
         return;
       }
@@ -1393,8 +1413,13 @@ namespace video {
               // only support a single display session per device/application.
               disp.reset();
 
-              // Refresh display names since a display removal might have caused the reinitialization
-              refresh_displays(encoder.platform_formats->dev_type, display_names, display_p, proc::proc.display_name);
+              // Coordinated groups must retain their original slot. Reprobing
+              // all displays here would fail on outputs owned by sibling groups
+              // and could silently shift a stream onto the wrong monitor.
+              if (!coordinated_capture) {
+                refresh_displays(encoder.platform_formats->dev_type, display_names, display_p, proc::proc.display_name);
+                group_display_name = display_names[display_p];
+              }
 
               // Process any pending display switch with the new list of displays
               if (switch_display_event->peek()) {
@@ -1402,9 +1427,11 @@ namespace video {
               }
 
               // reset_display() will sleep between retries
-              reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+              reset_display(disp, encoder.platform_formats->dev_type, group_display_name, capture_ctxs.front().config);
               if (disp) {
-                proc::proc.display_name = display_names[display_p];
+                if (!coordinated_capture || group_id == 0) {
+                  proc::proc.display_name = group_display_name;
+                }
                 break;
               }
             }
@@ -3011,6 +3038,12 @@ namespace video {
 #endif
 
   int start_capture_async(capture_thread_async_ctx_t &capture_thread_ctx) {
+    {
+      std::lock_guard lock {capture_group_displays_mutex};
+      if (active_capture_group_threads++ == 0) {
+        capture_group_display_names.clear();
+      }
+    }
     capture_thread_ctx.encoder_p = chosen_encoder;
     capture_thread_ctx.reinit_event.reset();
 
@@ -3032,6 +3065,12 @@ namespace video {
     capture_thread_ctx.capture_ctx_queue->stop();
 
     capture_thread_ctx.capture_thread.join();
+    {
+      std::lock_guard lock {capture_group_displays_mutex};
+      if (active_capture_group_threads > 0 && --active_capture_group_threads == 0) {
+        capture_group_display_names.clear();
+      }
+    }
   }
 
   int start_capture_sync(capture_thread_sync_ctx_t &ctx) {
