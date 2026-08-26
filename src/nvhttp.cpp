@@ -1360,6 +1360,16 @@ namespace nvhttp {
 
         BOOST_LOG(debug) << "Resuming app [" << proc::proc.get_last_run_app_name() << "] from launch app path...";
 
+        if (launch_session->monitor_count > 1 && launch_session->monitor_index > 0) {
+          auto err = proc::proc.prepare_additional_virtual_display(launch_session);
+          if (err) {
+            tree.put("root.resume", 0);
+            tree.put("root.<xmlattr>.status_code", err);
+            tree.put("root.<xmlattr>.status_message", "Failed to create the requested monitor virtual display");
+            return;
+          }
+        }
+
         if (!proc::proc.allow_client_commands || !named_cert_p->allow_client_commands) {
           launch_session->client_do_cmds.clear();
           launch_session->client_undo_cmds.clear();
@@ -1484,6 +1494,16 @@ namespace nvhttp {
       host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     }
     auto launch_session = make_launch_session(host_audio, false, args, named_cert_p);
+
+    if (launch_session->monitor_count > 1 && launch_session->monitor_index > 0) {
+      auto err = proc::proc.prepare_additional_virtual_display(launch_session);
+      if (err) {
+        tree.put("root.resume", 0);
+        tree.put("root.<xmlattr>.status_code", err);
+        tree.put("root.<xmlattr>.status_message", "Failed to create the requested monitor virtual display");
+        return;
+      }
+    }
 
     if (!proc::proc.allow_client_commands || !named_cert_p->allow_client_commands) {
       launch_session->client_do_cmds.clear();

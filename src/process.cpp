@@ -175,6 +175,79 @@ namespace proc {
 #endif
   }
 
+  int proc_t::prepare_additional_virtual_display(std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+#ifdef _WIN32
+    if (!launch_session || launch_session->monitor_count <= 1 || launch_session->monitor_index == 0) {
+      return 0;
+    }
+
+    auto existing = _additional_virtual_displays.find(launch_session->monitor_index);
+    if (existing != _additional_virtual_displays.end()) {
+      launch_session->virtual_display = true;
+      launch_session->display_guid = existing->second.first;
+      launch_session->display_name = existing->second.second;
+      return 0;
+    }
+
+    if (vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
+      initVDisplayDriver();
+    }
+    if (vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
+      return 503;
+    }
+
+    if (!config::video.adapter_name.empty()) {
+      VDISPLAY::setRenderAdapterByName(platf::from_utf8(config::video.adapter_name));
+    }
+
+    auto device_uuid = uuid_util::uuid_t::parse(launch_session->unique_id);
+    device_uuid.b64[1] ^= static_cast<uint64_t>(launch_session->monitor_index);
+    auto device_uuid_str = device_uuid.string();
+    memcpy(&launch_session->display_guid, &device_uuid, sizeof(GUID));
+
+    uint32_t render_width = launch_session->width ? launch_session->width : 1920;
+    uint32_t render_height = launch_session->height ? launch_session->height : 1080;
+    if (launch_session->scale_factor != 100) {
+      render_width = static_cast<uint32_t>(render_width * (launch_session->scale_factor / 100.0f)) & ~1U;
+      render_height = static_cast<uint32_t>(render_height * (launch_session->scale_factor / 100.0f)) & ~1U;
+    }
+
+    int target_fps = launch_session->fps ? launch_session->fps : 60000;
+    if (target_fps < 1000) {
+      target_fps *= 1000;
+    }
+    if (config::video.double_refreshrate) {
+      target_fps *= 2;
+    }
+
+    auto device_name = launch_session->device_name + " monitor " + std::to_string(launch_session->monitor_index + 1);
+    auto vdisplay_name = VDISPLAY::createVirtualDisplay(
+      device_uuid_str.c_str(), device_name.c_str(), render_width, render_height, target_fps, launch_session->display_guid
+    );
+    launch_session->virtual_display = true;
+    if (vdisplay_name.empty()) {
+      BOOST_LOG(error) << "LoLa failed to create virtual display for monitor slot [" << launch_session->monitor_index << ']';
+      return 503;
+    }
+
+    BOOST_LOG(info) << "LoLa virtual display for monitor slot [" << launch_session->monitor_index << "] created at " << vdisplay_name;
+    VDISPLAY::changeDisplaySettings(vdisplay_name.c_str(), render_width, render_height, target_fps);
+    if (config::video.isolated_virtual_display_option) {
+      VDISPLAY::changeDisplaySettings2(vdisplay_name.c_str(), render_width, render_height, target_fps, true);
+    }
+
+    launch_session->display_name = platf::to_utf8(vdisplay_name);
+    _additional_virtual_displays.emplace(
+      launch_session->monitor_index,
+      std::make_pair(launch_session->display_guid, launch_session->display_name)
+    );
+    return 0;
+#else
+    (void) launch_session;
+    return 0;
+#endif
+  }
+
   int proc_t::execute(const ctx_t& app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
     if (_app_id == input_only_app_id) {
       terminate(false, false);
@@ -332,6 +405,24 @@ namespace proc {
       } else {
         // Driver isn't working so we don't need to track virtual display.
         launch_session->virtual_display = false;
+      }
+    }
+
+    if (launch_session->monitor_count > 1 && launch_session->monitor_index == 0) {
+      for (uint32_t monitor_index = 1; monitor_index < launch_session->monitor_count; ++monitor_index) {
+        auto additional_session = std::make_shared<rtsp_stream::launch_session_t>();
+        additional_session->device_name = launch_session->device_name;
+        additional_session->unique_id = launch_session->unique_id;
+        additional_session->width = launch_session->width;
+        additional_session->height = launch_session->height;
+        additional_session->fps = launch_session->fps;
+        additional_session->scale_factor = launch_session->scale_factor;
+        additional_session->monitor_count = launch_session->monitor_count;
+        additional_session->monitor_index = monitor_index;
+        if (prepare_additional_virtual_display(additional_session)) {
+          BOOST_LOG(error) << "LoLa failed to prepare virtual display for monitor slot [" << monitor_index << ']';
+          return 503;
+        }
       }
     }
 
@@ -767,6 +858,15 @@ namespace proc {
         BOOST_LOG(warning) << "Virtual Display remove failed, but it seems it was not created correctly either.";
       }
     }
+
+    for (const auto &[monitor_index, display] : _additional_virtual_displays) {
+      if (VDISPLAY::removeVirtualDisplay(display.first)) {
+        BOOST_LOG(info) << "LoLa virtual display for monitor slot [" << monitor_index << "] removed successfully";
+      } else {
+        BOOST_LOG(warning) << "LoLa virtual display remove failed for monitor slot [" << monitor_index << ']';
+      }
+    }
+    _additional_virtual_displays.clear();
 
     // Only show the Stopped notification if we actually have an app to stop
     // Since terminate() is always run when a new app has started

@@ -13,6 +13,7 @@
 #endif
 
 // standard includes
+#include <map>
 #include <optional>
 #include <unordered_map>
 
@@ -123,6 +124,8 @@ namespace proc {
 
     int execute(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
 
+    int prepare_additional_virtual_display(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+
     /**
      * @return `_app_id` if a process is running, otherwise returns `0`
      */
@@ -148,6 +151,10 @@ namespace proc {
 
     std::shared_ptr<rtsp_stream::launch_session_t> _launch_session;
     std::shared_ptr<config::input_t> _saved_input_config;
+
+  #ifdef _WIN32
+    std::map<uint32_t, std::pair<GUID, std::string>> _additional_virtual_displays;
+  #endif
 
     std::vector<ctx_t> _apps;
     ctx_t _app;
