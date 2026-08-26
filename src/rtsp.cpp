@@ -1114,7 +1114,7 @@ namespace rtsp_stream {
       config.audio.flags[audio::config_t::CUSTOM_SURROUND_PARAMS] = valid;
     }
 
-    config.audio.input_only = session.input_only;
+    config.audio.input_only = config.audio.input_only || session.input_only;
 
     // If the client sent a configured bitrate, we will choose the actual bitrate ourselves
     // by using FEC percentage and audio quality settings. If the calculated bitrate ends up
