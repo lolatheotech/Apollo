@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <format>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -1727,6 +1728,35 @@ namespace nvhttp {
     return std::find(sessions.begin(), sessions.end(), client->uuid) != sessions.end();
   }
 
+
+  enum class lola_scan_result { clean, malware, error };
+
+  lola_scan_result lola_scan_payload(std::string_view content) {
+#ifdef _WIN32
+    auto module = LoadLibraryW(L"amsi.dll");
+    if (!module) return lola_scan_result::error;
+    auto close_module = util::fail_guard([&]() { FreeLibrary(module); });
+    using amsi_context_t = void *;
+    using amsi_session_t = void *;
+    using amsi_result_t = unsigned long;
+    using initialize_t = HRESULT (WINAPI *)(LPCWSTR, amsi_context_t *);
+    using scan_t = HRESULT (WINAPI *)(amsi_context_t, PVOID, ULONG, LPCWSTR, amsi_session_t, amsi_result_t *);
+    using uninitialize_t = void (WINAPI *)(amsi_context_t);
+    auto initialize = reinterpret_cast<initialize_t>(GetProcAddress(module, "AmsiInitialize"));
+    auto scan = reinterpret_cast<scan_t>(GetProcAddress(module, "AmsiScanBuffer"));
+    auto uninitialize = reinterpret_cast<uninitialize_t>(GetProcAddress(module, "AmsiUninitialize"));
+    if (!initialize || !scan || !uninitialize || content.size() > std::numeric_limits<ULONG>::max()) return lola_scan_result::error;
+    amsi_context_t context {};
+    if (FAILED(initialize(L"LoLa File Transfer", &context)) || !context) return lola_scan_result::error;
+    auto close_context = util::fail_guard([&]() { uninitialize(context); });
+    amsi_result_t result = 0;
+    if (FAILED(scan(context, const_cast<char *>(content.data()), static_cast<ULONG>(content.size()), L"LoLa quarantined upload", nullptr, &result))) return lola_scan_result::error;
+    return result >= 32768 ? lola_scan_result::malware : lola_scan_result::clean;
+#else
+    return lola_scan_result::error;
+#endif
+  }
+
   void uploadLolaFile(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
     auto client = get_verified_cert(request);
@@ -1817,14 +1847,49 @@ namespace nvhttp {
       return;
     }
     std::error_code ec;
-    fs::rename(part, dir / "payload.quarantine", ec);
+    auto quarantined = dir / "payload.quarantine";
+    fs::rename(part, quarantined, ec);
     if (ec) {
       fail(SimpleWeb::StatusCode::server_error_internal_server_error, "Failed", "storage_failure");
       return;
     }
     BOOST_LOG(info) << "LoLa file transfer [" << id << "] entered AwaitingMalwareScan"
                     << " fileName=[" << name << "] length=[" << declared << "]";
-    lola_file_reply(response, SimpleWeb::StatusCode::success_ok, id, "AwaitingMalwareScan");
+    const auto scan = lola_scan_payload(content);
+    if (scan == lola_scan_result::malware) {
+      BOOST_LOG(warning) << "LoLa file transfer [" << id << "] rejected by malware scan"
+                         << " fileName=[" << name << "] length=[" << declared << "]";
+      fail(SimpleWeb::StatusCode::client_error_bad_request, "Rejected", "malware_detected");
+      return;
+    }
+    if (scan == lola_scan_result::error) {
+      BOOST_LOG(error) << "LoLa file transfer [" << id << "] scanner unavailable; payload remains quarantined"
+                       << " fileName=[" << name << "] length=[" << declared << "]";
+      lola_file_reply(response, SimpleWeb::StatusCode::server_error_internal_server_error, id, "AwaitingMalwareScan", "scanner_unavailable");
+      return;
+    }
+    auto released_dir = platf::appdata() / "lola-file-transfer-downloads" / owner / id;
+    fs::create_directories(released_dir, ec);
+    if (ec) {
+      fail(SimpleWeb::StatusCode::server_error_internal_server_error, "Failed", "release_storage_failure");
+      return;
+    }
+    fs::rename(quarantined, released_dir / name, ec);
+    if (ec) {
+      fs::remove_all(released_dir, ec);
+      fail(SimpleWeb::StatusCode::server_error_internal_server_error, "Failed", "release_storage_failure");
+      return;
+    }
+    fs::remove_all(dir, ec);
+    {
+      std::lock_guard lock {lola_upload_mutex};
+      lola_uploads.erase(id);
+      lola_terminal_uploads.insert(id);
+    }
+    BOOST_LOG(info) << "LoLa file transfer [" << id << "] completed malware scan and release"
+                    << " fileName=[" << name << "] length=[" << declared << "] sha256=[" << expected_hash << "]";
+    lola_file_reply(response, SimpleWeb::StatusCode::success_ok, id, "Completed");
+
   }
 
   void cancelLolaFile(resp_https_t response, req_https_t request) {
