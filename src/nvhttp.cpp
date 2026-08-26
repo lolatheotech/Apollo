@@ -429,6 +429,37 @@ namespace nvhttp {
       std::copy(prepend_iv_p, prepend_iv_p + sizeof(prepend_iv), std::begin(launch_session->iv));
     }
 
+    // LoLa uses explicit monitor assignment. Invalid values fail closed to
+    // the legacy single-monitor slot rather than selecting an arbitrary display.
+    const auto parse_monitor_value = [&](const char *name, uint32_t fallback, uint32_t maximum) {
+      const auto value = get_arg(args, name, "");
+      if (value.empty()) {
+        return fallback;
+      }
+
+      try {
+        std::size_t consumed = 0;
+        const auto parsed = std::stoul(value, &consumed, 10);
+        if (consumed != value.size() || parsed > maximum) {
+          throw std::out_of_range("monitor contract");
+        }
+        return static_cast<uint32_t>(parsed);
+      } catch (const std::exception &) {
+        BOOST_LOG(warning) << "Rejected invalid LoLa monitor contract value "sv
+                           << name << '=' << value;
+        return fallback;
+      }
+    };
+
+    launch_session->monitor_count = parse_monitor_value("lola_monitor_count", 1, video::max_capture_groups);
+    if (launch_session->monitor_count == 0) {
+      launch_session->monitor_count = 1;
+    }
+    launch_session->monitor_index = parse_monitor_value("lola_monitor_index", 0, video::max_capture_groups - 1);
+    if (launch_session->monitor_index >= launch_session->monitor_count) {
+      launch_session->monitor_index = 0;
+    }
+
     std::stringstream mode;
     if (named_cert_p->display_mode.empty()) {
       auto mode_str = get_arg(args, "mode", config::video.fallback_mode.c_str());

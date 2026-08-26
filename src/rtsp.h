@@ -50,6 +50,12 @@ namespace rtsp_stream {
     bool enable_sops;
     bool virtual_display;
     uint32_t scale_factor;
+    // LoLa multi-monitor contract. Zero preserves Apollo's existing
+    // single-display behaviour. Non-zero values are explicit monitor slots;
+    // Apollo never assigns monitors round-robin.
+    uint32_t monitor_index {0};
+    uint32_t monitor_count {1};
+
 
     std::optional<crypto::cipher::gcm_t> rtsp_cipher;
     std::string rtsp_url_scheme;

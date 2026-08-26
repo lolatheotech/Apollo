@@ -1040,6 +1040,8 @@ namespace rtsp_stream {
       }
 
       config.monitor.input_only = session.input_only;
+      config.monitor.capture_group_id = session.monitor_index;
+      config.monitor.capture_group_count = session.monitor_count;
 
       configuredBitrateKbps = util::from_view(args.at("x-ml-video.configuredBitrateKbps"sv));
 

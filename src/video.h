@@ -48,7 +48,14 @@ namespace video {
 
     int encodingFramerate; // Requested display framerate
     bool input_only;
+
+    // Explicit LoLa monitor slot. Slot zero is the compatibility default.
+    uint32_t capture_group_id {0};
+    uint32_t capture_group_count {1};
+
   };
+
+  constexpr uint32_t max_capture_groups = 8;
 
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);
   platf::pix_fmt_e map_pix_fmt(AVPixelFormat fmt);
