@@ -2,6 +2,7 @@
 #include <string>
 
 namespace nvhttp {
+  std::string lola_sha256(std::string_view content);
   bool lola_safe_id(const std::string &value);
   bool lola_safe_name(const std::string &value);
 }
@@ -33,4 +34,11 @@ TEST(LoLaFileTransfer, RejectsPathsAndInvalidNames) {
   EXPECT_FALSE(nvhttp::lola_safe_name("bad:name.txt"));
   EXPECT_FALSE(nvhttp::lola_safe_name(std::string("bad\x01name.txt", 12)));
   EXPECT_FALSE(nvhttp::lola_safe_name(std::string(256, 'a')));
+}
+
+TEST(LoLaFileTransfer, UsesStandardLowercaseSha256) {
+  EXPECT_EQ(
+    nvhttp::lola_sha256("abc"),
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+  );
 }

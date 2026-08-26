@@ -1698,6 +1698,14 @@ namespace nvhttp {
     response->close_connection_after_response = true;
   }
 
+  std::string lola_sha256(std::string_view content) {
+    auto digest = util::hex(crypto::hash(content), true).to_string();
+    std::transform(digest.begin(), digest.end(), digest.begin(), [](unsigned char c) {
+      return static_cast<char>(std::tolower(c));
+    });
+    return digest;
+  }
+
   bool lola_safe_id(const std::string &value) {
     return !value.empty() && value.size() <= 128 &&
       std::all_of(value.begin(), value.end(), [](unsigned char c) {
@@ -1800,7 +1808,7 @@ namespace nvhttp {
       return;
     }
     output.close();
-    if (util::hex(crypto::hash(content)).to_string() != expected_hash) {
+    if (lola_sha256(content) != expected_hash) {
       fail(SimpleWeb::StatusCode::client_error_bad_request, "Rejected", "digest_mismatch");
       return;
     }
