@@ -477,7 +477,10 @@ namespace platf::dxgi {
         DXGI_ADAPTER_DESC1 adapter_desc;
         adapter_tmp->GetDesc1(&adapter_desc);
 
-        if (!adapter_name.empty() && adapter_desc.Description != adapter_name) {
+        // An explicitly requested output may belong to a virtual or secondary
+        // adapter. Match it by its globally unique display name instead of
+        // excluding it because the configured render adapter differs.
+        if (output_name.empty() && !adapter_name.empty() && adapter_desc.Description != adapter_name) {
           continue;
         }
 
