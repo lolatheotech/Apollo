@@ -6,6 +6,7 @@
 #include <atomic>
 #include <bitset>
 #include <list>
+#include <deque>
 #include <thread>
 
 // lib includes
@@ -468,6 +469,7 @@ namespace video {
     safe::signal_t reinit_event;
     const encoder_t *encoder_p;
     sync_util::sync_t<std::weak_ptr<platf::display_t>> display_wp;
+    uint32_t group_id {0};
   };
 
   struct capture_thread_sync_ctx_t {
@@ -480,7 +482,20 @@ namespace video {
   void end_capture_async(capture_thread_async_ctx_t &ctx);
 
   // Keep a reference counter to ensure the capture thread only runs when other threads have a reference to the capture thread
-  auto capture_thread_async = safe::make_shared<capture_thread_async_ctx_t>(start_capture_async, end_capture_async);
+  using capture_thread_shared_t = safe::shared_t<capture_thread_async_ctx_t>;
+
+  auto capture_threads_async = []() {
+    std::deque<capture_thread_shared_t> groups;
+    for (uint32_t group_id = 0; group_id < max_capture_groups; ++group_id) {
+      groups.emplace_back(
+        [group_id](capture_thread_async_ctx_t &ctx) {
+          ctx.group_id = group_id;
+          return start_capture_async(ctx);
+        },
+        end_capture_async);
+    }
+    return groups;
+  }();
   auto capture_thread_sync = safe::make_shared<capture_thread_sync_ctx_t>(start_capture_sync, end_capture_sync);
 
 #ifdef _WIN32
@@ -1145,7 +1160,8 @@ namespace video {
     std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue,
     sync_util::sync_t<std::weak_ptr<platf::display_t>> &display_wp,
     safe::signal_t &reinit_event,
-    const encoder_t &encoder
+    const encoder_t &encoder,
+    uint32_t group_id
   ) {
     std::vector<capture_ctx_t> capture_ctxs;
 
@@ -1173,17 +1189,23 @@ namespace video {
     std::vector<std::string> display_names;
     int display_p = -1;
     std::shared_ptr<platf::display_t> disp;
-    if (!proc::proc.display_name.empty()) {
+    if (group_id == 0 && !proc::proc.display_name.empty()) {
       disp = platf::display(encoder.platform_formats->dev_type, proc::proc.display_name, capture_ctxs.front().config);
     }
     if (!disp) {
-      // Get all the monitor names now, rather than at boot, to
-      // get the most up-to-date list available monitors
+      // Each capture group owns one stable display slot. Re-enumeration keeps
+      // that slot deterministic and fails closed if the requested display is absent.
       refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+      if (group_id >= display_names.size()) {
+        BOOST_LOG(error) << "Capture group "sv << group_id
+                         << " has no corresponding display"sv;
+        return;
+      }
+      display_p = static_cast<int>(group_id);
       disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
-      if (disp) {
+      if (disp && group_id == 0) {
         proc::proc.display_name = display_names[display_p];
-      } else {
+      } else if (!disp) {
         return;
       }
     }
@@ -2372,7 +2394,8 @@ namespace video {
       shutdown_event->raise(true);
     });
 
-    auto ref = capture_thread_async.ref();
+    const auto group_id = std::min(config.capture_group_id, max_capture_groups - 1);
+    auto ref = capture_threads_async[group_id].ref();
     if (!ref) {
       return;
     }
@@ -2998,7 +3021,8 @@ namespace video {
       capture_thread_ctx.capture_ctx_queue,
       std::ref(capture_thread_ctx.display_wp),
       std::ref(capture_thread_ctx.reinit_event),
-      std::ref(*capture_thread_ctx.encoder_p)
+      std::ref(*capture_thread_ctx.encoder_p),
+      capture_thread_ctx.group_id
     };
 
     return 0;

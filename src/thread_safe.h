@@ -433,7 +433,8 @@ namespace safe {
     template<class FC, class FD>
     shared_t(FC &&fc, FD &&fd):
         _construct {std::forward<FC>(fc)},
-        _destruct {std::forward<FD>(fd)} {
+        _destruct {std::forward<FD>(fd)},
+        _count {0} {
     }
 
     [[nodiscard]] ptr_t ref() {
