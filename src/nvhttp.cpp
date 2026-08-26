@@ -1742,7 +1742,11 @@ namespace nvhttp {
       lola_file_reply(response, SimpleWeb::StatusCode::client_error_unauthorized, id, "Rejected", "permission_denied");
       return;
     }
-    if (!lola_active_client(client) || session != client->uuid) {
+    if (!lola_safe_id(session)) {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "invalid_session_id");
+      return;
+    }
+    if (!lola_active_client(client)) {
       lola_file_reply(response, SimpleWeb::StatusCode::client_error_forbidden, id, "Rejected", "inactive_session");
       return;
     }
@@ -1833,7 +1837,11 @@ namespace nvhttp {
       lola_file_reply(response, SimpleWeb::StatusCode::client_error_unauthorized, id, "Rejected", "permission_denied");
       return;
     }
-    if (!lola_active_client(client) || session != client->uuid) {
+    if (!lola_safe_id(session)) {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "invalid_session_id");
+      return;
+    }
+    if (!lola_active_client(client)) {
       lola_file_reply(response, SimpleWeb::StatusCode::client_error_forbidden, id, "Rejected", "inactive_session");
       return;
     }
