@@ -1810,6 +1810,7 @@ namespace nvhttp {
 
     auto owner = util::hex(crypto::hash(client->uuid)).to_string();
     auto dir = platf::appdata() / "lola-file-transfer-quarantine" / owner / id;
+    auto terminal_dir = platf::appdata() / "lola-file-transfer-terminal" / owner / id;
     {
       std::lock_guard lock {lola_upload_mutex};
       if (lola_uploads.contains(id) || lola_terminal_uploads.contains(id)) {
@@ -1817,6 +1818,11 @@ namespace nvhttp {
         return;
       }
       std::error_code ec;
+      fs::create_directories(terminal_dir.parent_path(), ec);
+      if (ec || !fs::create_directory(terminal_dir, ec)) {
+        lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "transfer_id_reused");
+        return;
+      }
       fs::create_directories(dir.parent_path(), ec);
       if (ec || !fs::create_directory(dir, ec)) {
         lola_terminal_uploads.insert(id);
