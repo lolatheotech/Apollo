@@ -52,6 +52,7 @@ namespace video {
     // Explicit LoLa monitor slot. Slot zero is the compatibility default.
     uint32_t capture_group_id {0};
     uint32_t capture_group_count {1};
+    std::string display_name;
 
   };
 

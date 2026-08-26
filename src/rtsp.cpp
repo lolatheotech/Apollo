@@ -1042,6 +1042,7 @@ namespace rtsp_stream {
       config.monitor.input_only = session.input_only;
       config.monitor.capture_group_id = session.monitor_index;
       config.monitor.capture_group_count = session.monitor_count;
+      config.monitor.display_name = session.display_name;
 
       // A LoLa multi-monitor session has one audio owner. Secondary monitor
       // streams remain fully active for video and input, but wait on the

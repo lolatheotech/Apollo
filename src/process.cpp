@@ -319,6 +319,7 @@ namespace proc {
           // Set virtual_display to true when everything went fine
           this->virtual_display = true;
           this->display_name = platf::to_utf8(vdisplayName);
+          launch_session->display_name = this->display_name;
 
           // When using virtual display, we don't care which display user configured to use.
           // So we always set output_name to the newly created virtual display as a workaround for

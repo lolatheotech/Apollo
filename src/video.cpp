@@ -1200,6 +1200,9 @@ namespace video {
     std::shared_ptr<platf::display_t> disp;
     const bool coordinated_capture = capture_ctxs.front().config.capture_group_count > 1;
     std::string group_display_name;
+    if (!capture_ctxs.front().config.display_name.empty()) {
+      disp = platf::display(encoder.platform_formats->dev_type, capture_ctxs.front().config.display_name, capture_ctxs.front().config);
+    }
     if (!coordinated_capture && group_id == 0 && !proc::proc.display_name.empty()) {
       disp = platf::display(encoder.platform_formats->dev_type, proc::proc.display_name, capture_ctxs.front().config);
     }
