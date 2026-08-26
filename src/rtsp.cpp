@@ -1043,6 +1043,14 @@ namespace rtsp_stream {
       config.monitor.capture_group_id = session.monitor_index;
       config.monitor.capture_group_count = session.monitor_count;
 
+      // A LoLa multi-monitor session has one audio owner. Secondary monitor
+      // streams remain fully active for video and input, but wait on the
+      // session shutdown event instead of opening another audio capture path.
+      if (session.monitor_count > 1 && session.monitor_index != 0) {
+        config.audio.input_only = true;
+        BOOST_LOG(info) << "LoLa multi-monitor audio disabled for secondary monitor slot [" << session.monitor_index << ']';
+      }
+
       configuredBitrateKbps = util::from_view(args.at("x-ml-video.configuredBitrateKbps"sv));
 
       if (!configuredBitrateKbps) {
