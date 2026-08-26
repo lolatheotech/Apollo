@@ -1298,6 +1298,46 @@ namespace confighttp {
     }
   }
 
+  void
+  armLolaPairing(resp_https_t response, req_https_t request) {
+    if (!request->remote_endpoint().address().is_loopback()) {
+      response->write(SimpleWeb::StatusCode::client_error_forbidden);
+      return;
+    }
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) return;
+    std::stringstream ss;
+    ss << request->content.rdbuf();
+    try {
+      nlohmann::json inputTree = nlohmann::json::parse(ss.str());
+      nlohmann::json outputTree;
+      auto pin = inputTree.value("pin", "");
+      if (!nvhttp::arm_lola_pairing(std::move(pin))) {
+        throw std::runtime_error("Pairing PIN must contain exactly four digits");
+      }
+      outputTree["status"] = true;
+      outputTree["message"] = "LoLa pairing armed";
+      send_response(response, outputTree);
+    }
+    catch (std::exception &e) {
+      BOOST_LOG(warning) << "LoLa pairing arm failed: "sv << e.what();
+      bad_request(response, request, e.what());
+    }
+  }
+  void
+  getLolaPairingStatus(resp_https_t response, req_https_t request) {
+    if (!request->remote_endpoint().address().is_loopback()) {
+      response->write(SimpleWeb::StatusCode::client_error_forbidden);
+      return;
+    }
+    if (!authenticate(response, request)) return;
+    nlohmann::json outputTree;
+    auto fingerprint = nvhttp::take_lola_pairing_fingerprint();
+    outputTree["status"] = fingerprint.empty() ? "PENDING" : "PAIRED";
+    if (!fingerprint.empty()) {
+      outputTree["certificateFingerprint"] = fingerprint;
+    }
+    send_response(response, outputTree);
+  }
   /**
    * @brief Reset the display device persistence.
    * @param response The HTTP response object.
@@ -1533,6 +1573,8 @@ namespace confighttp {
     server.resource["^/api/login"]["POST"] = login;
     server.resource["^/api/pin$"]["POST"] = savePin;
     server.resource["^/api/otp$"]["POST"] = getOTP;
+    server.resource["^/api/lola/pairing$"]["POST"] = armLolaPairing;
+    server.resource["^/api/lola/pairing$"]["GET"] = getLolaPairingStatus;
     server.resource["^/api/apps$"]["GET"] = getApps;
     server.resource["^/api/apps$"]["POST"] = saveApp;
     server.resource["^/api/apps/reorder$"]["POST"] = reorderApps;

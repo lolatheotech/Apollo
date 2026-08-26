@@ -7,8 +7,13 @@
 
 // standard includes
 #include <filesystem>
+#include <fstream>
 #include <format>
+#include <limits>
+#include <mutex>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <string>
 
@@ -64,6 +69,16 @@ namespace nvhttp {
   static std::string otp_passphrase;
   static std::string otp_device_name;
   static std::chrono::time_point<std::chrono::steady_clock> otp_creation_time;
+  static std::mutex lola_pairing_mutex;
+  static std::string lola_pairing_pin;
+  static std::string lola_pairing_client_unique_id;
+  static std::string lola_pairing_client_certificate_fingerprint;
+  static std::string lola_pairing_certificate_fingerprint;
+  static std::chrono::time_point<std::chrono::steady_clock> lola_pairing_creation_time;
+  static constexpr std::uint64_t lola_upload_limit = 64ULL * 1024ULL * 1024ULL;
+  static std::mutex lola_upload_mutex;
+  static std::unordered_map<std::string, std::pair<fs::path, std::string>> lola_uploads;
+  static std::unordered_set<std::string> lola_terminal_uploads;
 
   class SunshineHTTPSServer: public SimpleWeb::ServerBase<SunshineHTTPS> {
   public:
@@ -368,6 +383,8 @@ namespace nvhttp {
   void add_authorized_client(const p_named_cert_t& named_cert_p) {
     client_t &client = client_root;
     client.named_devices.push_back(named_cert_p);
+    auto cert_for_chain = named_cert_p;
+    cert_chain.add(cert_for_chain);
 
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
     system_tray::update_tray_paired(named_cert_p->name);
@@ -375,7 +392,6 @@ namespace nvhttp {
 
     if (!config::sunshine.flags[config::flag::FRESH_STATE]) {
       save_state();
-      load_state();
     }
   }
 
@@ -623,10 +639,31 @@ namespace nvhttp {
         if (c == '(') c = '[';
         else if (c == ')') c = ']';
       }
+      bool lola_authorized_client = false;
+      {
+        std::lock_guard lock { lola_pairing_mutex };
+        const auto certificate_fingerprint = util::hex(crypto::hash(client.cert)).to_string();
+        if ((!lola_pairing_client_certificate_fingerprint.empty() &&
+             lola_pairing_client_certificate_fingerprint == certificate_fingerprint) ||
+            (!lola_pairing_client_unique_id.empty() && lola_pairing_client_unique_id == client.uniqueID)) {
+          lola_pairing_certificate_fingerprint = certificate_fingerprint;
+          lola_authorized_client = true;
+          lola_pairing_client_unique_id.clear();
+          lola_pairing_client_certificate_fingerprint.clear();
+        }
+      }
       named_cert_p->cert = std::move(client.cert);
       named_cert_p->uuid = uuid_util::uuid_t::generate().string();
       // If the device is the first one paired with the server, assign full permission.
-      if (client_root.named_devices.empty()) {
+      if (lola_authorized_client) {
+        // LoLa remote desktop clients need stream lifecycle, input, and
+        // text-clipboard access. Server-command and file-transfer permissions
+        // remain excluded.
+        named_cert_p->perm = static_cast<PERM>(static_cast<uint32_t>(PERM::_all_inputs) |
+                                               static_cast<uint32_t>(PERM::_all_actions) |
+                                               static_cast<uint32_t>(PERM::clipboard_set) |
+                                               static_cast<uint32_t>(PERM::clipboard_read));
+      } else if (client_root.named_devices.empty()) {
         named_cert_p->perm = PERM::_all;
       } else {
         named_cert_p->perm = PERM::_default;
@@ -779,6 +816,25 @@ namespace nvhttp {
 
           // Always return positive, attackers will fail in the next steps.
           getservercert(ptr->second, tree, crypto::rand(16));
+          return;
+        }
+
+        std::string armed_lola_pin;
+        {
+          std::lock_guard lock { lola_pairing_mutex };
+          const bool active = !lola_pairing_pin.empty() &&
+                              std::chrono::steady_clock::now() - lola_pairing_creation_time <= OTP_EXPIRE_DURATION;
+          if (active) {
+            armed_lola_pin = std::move(lola_pairing_pin);
+            lola_pairing_client_unique_id = ptr->second.client.uniqueID;
+            lola_pairing_client_certificate_fingerprint = util::hex(crypto::hash(ptr->second.client.cert)).to_string();
+          }
+          if (!active || !armed_lola_pin.empty()) {
+            lola_pairing_pin.clear();
+          }
+        }
+        if (!armed_lola_pin.empty()) {
+          getservercert(ptr->second, tree, armed_lola_pin);
           return;
         }
 
@@ -1628,6 +1684,264 @@ namespace nvhttp {
     return;
   }
 
+  void lola_file_reply(resp_https_t response, SimpleWeb::StatusCode code,
+                       const std::string &id, const std::string &state,
+                       const std::string &failure = {}) {
+    pt::ptree body;
+    body.put("transferId", id);
+    body.put("state", state);
+    if (!failure.empty()) body.put("failureCode", failure);
+    std::ostringstream json;
+    pt::write_json(json, body, false);
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    response->write(code, json.str(), headers);
+    response->close_connection_after_response = true;
+  }
+
+  std::string lola_sha256(std::string_view content) {
+    auto digest = util::hex(crypto::hash(content), true).to_string();
+    std::transform(digest.begin(), digest.end(), digest.begin(), [](unsigned char c) {
+      return static_cast<char>(std::tolower(c));
+    });
+    return digest;
+  }
+
+  bool lola_safe_id(const std::string &value) {
+    return !value.empty() && value.size() <= 128 &&
+      std::all_of(value.begin(), value.end(), [](unsigned char c) {
+        return std::isalnum(c) || c == '-' || c == '_';
+      });
+  }
+
+  bool lola_safe_name(const std::string &value) {
+    constexpr std::string_view invalid {"<>:\"|?*"};
+    return !value.empty() && value.size() <= 255 && value != "." && value != ".." &&
+      value.find('/') == std::string::npos && value.find('\\') == std::string::npos &&
+      std::none_of(value.begin(), value.end(), [&](unsigned char c) {
+        return c < 32 || invalid.find(static_cast<char>(c)) != std::string_view::npos;
+      });
+  }
+
+  bool lola_active_client(const crypto::named_cert_t *client) {
+    auto sessions = rtsp_stream::get_all_session_uuids();
+    return std::find(sessions.begin(), sessions.end(), client->uuid) != sessions.end();
+  }
+
+
+  enum class lola_scan_result { clean, malware, error };
+
+  lola_scan_result lola_scan_payload(std::string_view content) {
+#ifdef _WIN32
+    auto module = LoadLibraryW(L"amsi.dll");
+    if (!module) return lola_scan_result::error;
+    auto close_module = util::fail_guard([&]() { FreeLibrary(module); });
+    using amsi_context_t = void *;
+    using amsi_session_t = void *;
+    using amsi_result_t = unsigned long;
+    using initialize_t = HRESULT (WINAPI *)(LPCWSTR, amsi_context_t *);
+    using scan_t = HRESULT (WINAPI *)(amsi_context_t, PVOID, ULONG, LPCWSTR, amsi_session_t, amsi_result_t *);
+    using uninitialize_t = void (WINAPI *)(amsi_context_t);
+    auto initialize = reinterpret_cast<initialize_t>(GetProcAddress(module, "AmsiInitialize"));
+    auto scan = reinterpret_cast<scan_t>(GetProcAddress(module, "AmsiScanBuffer"));
+    auto uninitialize = reinterpret_cast<uninitialize_t>(GetProcAddress(module, "AmsiUninitialize"));
+    if (!initialize || !scan || !uninitialize || content.size() > std::numeric_limits<ULONG>::max()) return lola_scan_result::error;
+    amsi_context_t context {};
+    if (FAILED(initialize(L"LoLa File Transfer", &context)) || !context) return lola_scan_result::error;
+    auto close_context = util::fail_guard([&]() { uninitialize(context); });
+    amsi_result_t result = 0;
+    if (FAILED(scan(context, const_cast<char *>(content.data()), static_cast<ULONG>(content.size()), L"LoLa quarantined upload", nullptr, &result))) return lola_scan_result::error;
+    return result >= 32768 ? lola_scan_result::malware : lola_scan_result::clean;
+#else
+    return lola_scan_result::error;
+#endif
+  }
+
+  void uploadLolaFile(resp_https_t response, req_https_t request) {
+    print_req<SunshineHTTPS>(request);
+    auto client = get_verified_cert(request);
+    auto args = request->parse_query_string();
+    auto id = get_arg(args, "transferId", "");
+    auto session = get_arg(args, "sessionId", "");
+    auto name = get_arg(args, "fileName", "");
+    auto expected_hash = get_arg(args, "sha256", "");
+    auto consent = get_arg(args, "consent", "false");
+    auto length_text = get_arg(args, "length", "");
+
+    if (!(client->perm & PERM::_allow_view) || !(client->perm & PERM::file_upload)) {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_unauthorized, id, "Rejected", "permission_denied");
+      return;
+    }
+    if (!lola_safe_id(session)) {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "invalid_session_id");
+      return;
+    }
+    if (!lola_active_client(client)) {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_forbidden, id, "Rejected", "inactive_session");
+      return;
+    }
+    if (consent != "true") {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "consent_required");
+      return;
+    }
+    if (!lola_safe_id(id) || !lola_safe_name(name) || expected_hash.size() != 64 ||
+        !std::all_of(expected_hash.begin(), expected_hash.end(), [](unsigned char c) { return std::isxdigit(c); })) {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "invalid_metadata");
+      return;
+    }
+
+    std::uint64_t declared {};
+    try {
+      std::size_t parsed {};
+      declared = std::stoull(length_text, &parsed);
+      if (parsed != length_text.size()) throw std::invalid_argument("trailing");
+    } catch (...) {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "invalid_length");
+      return;
+    }
+    const auto content = request->content.string();
+    if (declared == 0 || declared > lola_upload_limit || content.size() != declared) {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "length_rejected");
+      return;
+    }
+    std::transform(expected_hash.begin(), expected_hash.end(), expected_hash.begin(), [](unsigned char c) {
+      return static_cast<char>(std::tolower(c));
+    });
+
+    auto owner = util::hex(crypto::hash(client->uuid)).to_string();
+    auto dir = platf::appdata() / "lola-file-transfer-quarantine" / owner / id;
+    auto terminal_dir = platf::appdata() / "lola-file-transfer-terminal" / owner / id;
+    {
+      std::lock_guard lock {lola_upload_mutex};
+      if (lola_uploads.contains(id) || lola_terminal_uploads.contains(id)) {
+        lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "transfer_id_reused");
+        return;
+      }
+      std::error_code ec;
+      fs::create_directories(terminal_dir.parent_path(), ec);
+      if (ec || !fs::create_directory(terminal_dir, ec)) {
+        lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "transfer_id_reused");
+        return;
+      }
+      fs::create_directories(dir.parent_path(), ec);
+      if (ec || !fs::create_directory(dir, ec)) {
+        lola_terminal_uploads.insert(id);
+        lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "transfer_id_reused");
+        return;
+      }
+      lola_uploads.emplace(id, std::make_pair(dir, client->uuid));
+    }
+
+    auto fail = [&](SimpleWeb::StatusCode code, const char *state, const char *reason) {
+      std::error_code ec;
+      fs::remove_all(dir, ec);
+      std::lock_guard lock {lola_upload_mutex};
+      lola_uploads.erase(id);
+      lola_terminal_uploads.insert(id);
+      lola_file_reply(response, code, id, state, reason);
+    };
+    auto part = dir / "payload.part";
+    std::ofstream output(part, std::ios::binary | std::ios::out);
+    if (!output || !(output.write(content.data(), static_cast<std::streamsize>(content.size())))) {
+      output.close();
+      fail(SimpleWeb::StatusCode::server_error_internal_server_error, "Failed", "storage_failure");
+      return;
+    }
+    output.close();
+    if (lola_sha256(content) != expected_hash) {
+      fail(SimpleWeb::StatusCode::client_error_bad_request, "Rejected", "digest_mismatch");
+      return;
+    }
+    std::error_code ec;
+    auto quarantined = dir / "payload.quarantine";
+    fs::rename(part, quarantined, ec);
+    if (ec) {
+      fail(SimpleWeb::StatusCode::server_error_internal_server_error, "Failed", "storage_failure");
+      return;
+    }
+    BOOST_LOG(info) << "LoLa file transfer [" << id << "] entered AwaitingMalwareScan"
+                    << " fileName=[" << name << "] length=[" << declared << "]";
+    const auto scan = lola_scan_payload(content);
+    if (scan == lola_scan_result::malware) {
+      BOOST_LOG(warning) << "LoLa file transfer [" << id << "] rejected by malware scan"
+                         << " fileName=[" << name << "] length=[" << declared << "]";
+      fail(SimpleWeb::StatusCode::client_error_bad_request, "Rejected", "malware_detected");
+      return;
+    }
+    if (scan == lola_scan_result::error) {
+      BOOST_LOG(error) << "LoLa file transfer [" << id << "] scanner unavailable; payload remains quarantined"
+                       << " fileName=[" << name << "] length=[" << declared << "]";
+      lola_file_reply(response, SimpleWeb::StatusCode::server_error_internal_server_error, id, "AwaitingMalwareScan", "scanner_unavailable");
+      return;
+    }
+    auto released_dir = platf::appdata() / "lola-file-transfer-downloads" / owner / id;
+    fs::create_directories(released_dir, ec);
+    if (ec) {
+      fail(SimpleWeb::StatusCode::server_error_internal_server_error, "Failed", "release_storage_failure");
+      return;
+    }
+    fs::rename(quarantined, released_dir / name, ec);
+    if (ec) {
+      fs::remove_all(released_dir, ec);
+      fail(SimpleWeb::StatusCode::server_error_internal_server_error, "Failed", "release_storage_failure");
+      return;
+    }
+    fs::remove_all(dir, ec);
+    {
+      std::lock_guard lock {lola_upload_mutex};
+      lola_uploads.erase(id);
+      lola_terminal_uploads.insert(id);
+    }
+    BOOST_LOG(info) << "LoLa file transfer [" << id << "] completed malware scan and release"
+                    << " fileName=[" << name << "] length=[" << declared << "] sha256=[" << expected_hash << "]";
+    lola_file_reply(response, SimpleWeb::StatusCode::success_ok, id, "Completed");
+
+  }
+
+  void cancelLolaFile(resp_https_t response, req_https_t request) {
+    print_req<SunshineHTTPS>(request);
+    auto client = get_verified_cert(request);
+    auto args = request->parse_query_string();
+    auto id = get_arg(args, "transferId", "");
+    auto session = get_arg(args, "sessionId", "");
+    if (!(client->perm & PERM::_allow_view) || !(client->perm & PERM::file_upload)) {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_unauthorized, id, "Rejected", "permission_denied");
+      return;
+    }
+    if (!lola_safe_id(session)) {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "invalid_session_id");
+      return;
+    }
+    if (!lola_active_client(client)) {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_forbidden, id, "Rejected", "inactive_session");
+      return;
+    }
+    fs::path dir;
+    {
+      std::lock_guard lock {lola_upload_mutex};
+      auto found = lola_uploads.find(id);
+      if (found == lola_uploads.end()) {
+        lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "unknown_transfer");
+        return;
+      }
+      if (found->second.second != client->uuid) {
+        lola_file_reply(response, SimpleWeb::StatusCode::client_error_forbidden, id, "Rejected", "transfer_owner_mismatch");
+        return;
+      }
+      dir = found->second.first;
+      lola_uploads.erase(found);
+      lola_terminal_uploads.insert(id);
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    if (ec) {
+      lola_file_reply(response, SimpleWeb::StatusCode::server_error_internal_server_error, id, "Failed", "cleanup_failure");
+      return;
+    }
+    BOOST_LOG(info) << "LoLa file transfer [" << id << "] cancelled";
+    lola_file_reply(response, SimpleWeb::StatusCode::success_ok, id, "Cancelled");
+  }
+
   void setup(const std::string &pkey, const std::string &cert) {
     conf_intern.pkey = pkey;
     conf_intern.servercert = cert;
@@ -1728,6 +2042,8 @@ namespace nvhttp {
     https_server.resource["^/cancel$"]["GET"] = cancel;
     https_server.resource["^/actions/clipboard$"]["GET"] = getClipboard;
     https_server.resource["^/actions/clipboard$"]["POST"] = setClipboard;
+    https_server.resource["^/actions/files/upload$"]["POST"] = uploadLolaFile;
+    https_server.resource["^/actions/files/cancel$"]["POST"] = cancelLolaFile;
 
     https_server.config.reuse_address = true;
     https_server.config.address = net::af_to_any_address_string(address_family);
@@ -1768,6 +2084,24 @@ namespace nvhttp {
 
     ssl.join();
     tcp.join();
+  }
+
+  bool arm_lola_pairing(std::string pin) {
+    if (pin.size() != 4 || !std::all_of(pin.begin(), pin.end(), [](unsigned char value) { return std::isdigit(value); })) {
+      return false;
+    }
+    std::lock_guard lock { lola_pairing_mutex };
+    lola_pairing_pin = std::move(pin);
+    lola_pairing_client_unique_id.clear();
+    lola_pairing_client_certificate_fingerprint.clear();
+    lola_pairing_certificate_fingerprint.clear();
+    lola_pairing_creation_time = std::chrono::steady_clock::now();
+    return true;
+  }
+
+  std::string take_lola_pairing_fingerprint() {
+    std::lock_guard lock { lola_pairing_mutex };
+    return std::move(lola_pairing_certificate_fingerprint);
   }
 
   std::string request_otp(const std::string& passphrase, const std::string& deviceName) {
