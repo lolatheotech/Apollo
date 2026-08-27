@@ -24,6 +24,7 @@
 #include "video.h"
 
 #ifdef _WIN32
+  #include "platform/windows/cursor_broker.h"
   #include "platform/windows/misc.h"
   #include "platform/windows/virtual_display.h"
 #endif
@@ -62,6 +63,9 @@ std::map<std::string_view, std::function<int(const char *name, int argc, char **
 #ifdef _WIN32
   {"restore-nvprefs-undo"sv, [](const char *name, int argc, char **argv) {
      return args::restore_nvprefs_undo();
+   }},
+  {"cursor-broker"sv, [](const char *name, int argc, char **argv) {
+     return platf::cursor_broker::run(argc, argv);
    }},
 #endif
 };
