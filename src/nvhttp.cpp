@@ -1677,6 +1677,42 @@ namespace nvhttp {
     return;
   }
 
+  void getLolaCursor(resp_https_t response, req_https_t request) {
+    print_req<SunshineHTTPS>(request);
+
+    auto named_cert_p = get_verified_cert(request);
+    if (!(named_cert_p->perm & PERM::_allow_view)) {
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    const auto connected_uuids = rtsp_stream::get_all_session_uuids();
+    const bool connected = std::find(connected_uuids.begin(), connected_uuids.end(), named_cert_p->uuid) != connected_uuids.end();
+    if (!connected) {
+      response->write(SimpleWeb::StatusCode::client_error_forbidden);
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    const auto args = request->parse_query_string();
+    const auto monitor = get_arg(args, "monitor");
+    if (monitor.empty() || monitor.size() > 2 || !std::all_of(monitor.begin(), monitor.end(), [](unsigned char c) { return std::isdigit(c); })) {
+      response->write(SimpleWeb::StatusCode::client_error_bad_request);
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    nlohmann::json payload {
+      {"schemaVersion", 1}, {"monitorIndex", std::stoi(std::string(monitor))},
+      {"sequence", 0}, {"visible", false}, {"shape", "unsupported"},
+      {"width", 0}, {"height", 0}, {"hotspotX", 0}, {"hotspotY", 0}
+    };
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    response->write(SimpleWeb::StatusCode::success_ok, payload.dump(), headers);
+  }
+
   void
   setClipboard(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
@@ -2093,6 +2129,7 @@ namespace nvhttp {
     https_server.resource["^/cancel$"]["GET"] = cancel;
     https_server.resource["^/actions/clipboard$"]["GET"] = getClipboard;
     https_server.resource["^/actions/clipboard$"]["POST"] = setClipboard;
+    https_server.resource["^/actions/cursor$"]["GET"] = getLolaCursor;
     https_server.resource["^/actions/files/upload$"]["POST"] = uploadLolaFile;
     https_server.resource["^/actions/files/cancel$"]["POST"] = cancelLolaFile;
 
