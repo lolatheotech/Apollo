@@ -167,6 +167,19 @@ int main(int argc, char *argv[]) {
     return 0;
   }
 
+#ifdef _WIN32
+  // The cursor broker is a short-lived interactive-session helper. Dispatch it
+  // before initializing the main Apollo logger so it cannot rotate or contend
+  // with the service log file.
+  if (config::sunshine.cmd.name == "cursor-broker") {
+    auto fn = cmd_to_func.find(config::sunshine.cmd.name);
+    if (fn == std::end(cmd_to_func)) {
+      return 7;
+    }
+    return fn->second(argv[0], config::sunshine.cmd.argc, config::sunshine.cmd.argv);
+  }
+#endif
+
   auto log_deinit_guard = logging::init(config::sunshine.min_log_level, config::sunshine.log_file);
   if (!log_deinit_guard) {
     BOOST_LOG(error) << "Logging failed to initialize"sv;

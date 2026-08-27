@@ -17,6 +17,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "../../logging.h"
 
@@ -35,6 +36,51 @@ namespace platf::cursor_broker {
       char shape[shape_capacity];
     };
 
+    struct cursor_fingerprint_t {
+      DWORD hotspot_x {};
+      DWORD hotspot_y {};
+      LONG width {};
+      LONG height {};
+      std::vector<std::uint8_t> mask;
+      std::vector<std::uint8_t> color;
+    };
+
+    bool bitmap_bytes(HBITMAP bitmap, LONG &width, LONG &height, std::vector<std::uint8_t> &bytes) {
+      if (!bitmap) return true;
+      BITMAP description {};
+      if (!GetObjectW(bitmap, sizeof(description), &description) || description.bmWidth <= 0 || description.bmHeight <= 0) {
+        return false;
+      }
+      width = description.bmWidth;
+      height = description.bmHeight;
+      const auto size = static_cast<std::size_t>(description.bmWidthBytes) * description.bmHeight;
+      bytes.resize(size);
+      return size == 0 || GetBitmapBits(bitmap, static_cast<LONG>(size), bytes.data()) == static_cast<LONG>(size);
+    }
+
+    bool fingerprint(HCURSOR cursor, cursor_fingerprint_t &result) {
+      ICONINFO info {};
+      if (!cursor || !GetIconInfo(cursor, &info)) return false;
+      result.hotspot_x = info.xHotspot;
+      result.hotspot_y = info.yHotspot;
+      LONG mask_width = 0, mask_height = 0, color_width = 0, color_height = 0;
+      const bool ok = bitmap_bytes(info.hbmMask, mask_width, mask_height, result.mask) &&
+                      bitmap_bytes(info.hbmColor, color_width, color_height, result.color);
+      if (info.hbmMask) DeleteObject(info.hbmMask);
+      if (info.hbmColor) DeleteObject(info.hbmColor);
+      result.width = color_width ? color_width : mask_width;
+      result.height = color_height ? color_height : mask_height;
+      return ok;
+    }
+
+    bool cursors_equivalent(HCURSOR left, HCURSOR right) {
+      if (left == right) return true;
+      cursor_fingerprint_t a, b;
+      return fingerprint(left, a) && fingerprint(right, b) &&
+             a.hotspot_x == b.hotspot_x && a.hotspot_y == b.hotspot_y &&
+             a.width == b.width && a.height == b.height && a.mask == b.mask && a.color == b.color;
+    }
+
     const char *shape_name(HCURSOR cursor) {
       const std::pair<LPCSTR, const char *> known[] = {
         {IDC_ARROW, "arrow"}, {IDC_IBEAM, "ibeam"}, {IDC_WAIT, "wait"},
@@ -45,20 +91,9 @@ namespace platf::cursor_broker {
         {IDC_HAND, "hand"}, {IDC_APPSTARTING, "busy"}, {IDC_HELP, "help"}
       };
       for (const auto &[id, name] : known) {
-        if (cursor == LoadCursorA(nullptr, id)) {
-          return name;
-        }
+        if (cursors_equivalent(cursor, LoadCursorA(nullptr, id))) return name;
       }
       return "unsupported";
-    }
-
-    bool parse_u32(const char *text, DWORD &value) {
-      if (!text || !*text) {
-        return false;
-      }
-      const auto end = text + std::strlen(text);
-      const auto result = std::from_chars(text, end, value);
-      return result.ec == std::errc {} && result.ptr == end;
     }
 
     std::wstring widen_ascii(const char *text) {
@@ -84,8 +119,14 @@ namespace platf::cursor_broker {
       snapshot_t read() {
         std::lock_guard lock(mutex_);
         const DWORD active_session = WTSGetActiveConsoleSessionId();
+        const bool child_exited = child_ && WaitForSingleObject(child_, 0) == WAIT_OBJECT_0;
+        if (child_exited) {
+          DWORD exit_code = 0;
+          GetExitCodeProcess(child_, &exit_code);
+          BOOST_LOG(warning) << "Cursor broker exited with code " << exit_code;
+        }
         if (!state_ || active_session == 0xFFFFFFFF || active_session != session_id_ ||
-            !child_ || WaitForSingleObject(child_, 0) == WAIT_OBJECT_0) {
+            !child_ || child_exited) {
           start(active_session);
         }
         if (!state_) {
@@ -116,10 +157,15 @@ namespace platf::cursor_broker {
 
     private:
       void stop() {
+        if (lifetime_event_) {
+          SetEvent(lifetime_event_);
+        }
         if (child_) {
           if (WaitForSingleObject(child_, 0) == WAIT_TIMEOUT) {
-            TerminateProcess(child_, 0);
-            WaitForSingleObject(child_, 1000);
+            if (WaitForSingleObject(child_, 1000) == WAIT_TIMEOUT) {
+              TerminateProcess(child_, 0);
+              WaitForSingleObject(child_, 1000);
+            }
           }
           CloseHandle(child_);
           child_ = nullptr;
@@ -131,6 +177,10 @@ namespace platf::cursor_broker {
         if (mapping_) {
           CloseHandle(mapping_);
           mapping_ = nullptr;
+        }
+        if (lifetime_event_) {
+          CloseHandle(lifetime_event_);
+          lifetime_event_ = nullptr;
         }
         session_id_ = 0xFFFFFFFF;
       }
@@ -156,12 +206,14 @@ namespace platf::cursor_broker {
           BOOST_LOG(error) << "Cursor broker security descriptor failed: " << GetLastError();
           return;
         }
-        SECURITY_ATTRIBUTES security {sizeof(security), descriptor, FALSE};
+        SECURITY_ATTRIBUTES security {sizeof(security), descriptor, TRUE};
         mapping_ = CreateFileMappingW(INVALID_HANDLE_VALUE, &security, PAGE_READWRITE, 0,
                                       sizeof(shared_state_t), mapping_name_.c_str());
+        lifetime_event_ = CreateEventW(&security, TRUE, FALSE, nullptr);
         LocalFree(descriptor);
-        if (!mapping_) {
-          BOOST_LOG(error) << "Cursor broker mapping creation failed: " << GetLastError();
+        if (!mapping_ || !lifetime_event_) {
+          BOOST_LOG(error) << "Cursor broker IPC creation failed: " << GetLastError();
+          stop();
           return;
         }
         state_ = static_cast<shared_state_t *>(MapViewOfFile(mapping_, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(shared_state_t)));
@@ -187,7 +239,8 @@ namespace platf::cursor_broker {
           return;
         }
         std::wstring command = L"\"" + std::wstring(executable) + L"\" --cursor-broker \"" +
-                               mapping_name_ + L"\" " + std::to_wstring(GetCurrentProcessId());
+                               mapping_name_ + L"\" " +
+                               std::to_wstring(reinterpret_cast<std::uintptr_t>(lifetime_event_));
         STARTUPINFOW startup {};
         startup.cb = sizeof(startup);
         wchar_t desktop[] = L"winsta0\\default";
@@ -196,7 +249,7 @@ namespace platf::cursor_broker {
         void *environment = nullptr;
         CreateEnvironmentBlock(&environment, user_token, FALSE);
         const BOOL created = CreateProcessAsUserW(
-          user_token, executable, command.data(), nullptr, nullptr, FALSE,
+          user_token, executable, command.data(), nullptr, nullptr, TRUE,
           CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, environment, nullptr, &startup, &process);
         if (environment) {
           DestroyEnvironmentBlock(environment);
@@ -216,6 +269,7 @@ namespace platf::cursor_broker {
       std::mutex mutex_;
       HANDLE mapping_ {nullptr};
       HANDLE child_ {nullptr};
+      HANDLE lifetime_event_ {nullptr};
       shared_state_t *state_ {nullptr};
       DWORD session_id_ {0xFFFFFFFF};
       std::wstring mapping_name_;
@@ -232,28 +286,27 @@ namespace platf::cursor_broker {
       return 2;
     }
     const auto mapping_name = widen_ascii(argv[0]);
-    DWORD parent_pid = 0;
+    std::uintptr_t inherited_event_value = 0;
+    const auto event_text = argv[1];
+    const auto event_end = event_text + std::strlen(event_text);
+    const auto parsed = std::from_chars(event_text, event_end, inherited_event_value);
     if (mapping_name.rfind(L"Global\\LoLaCursorBroker-{", 0) != 0 ||
-        mapping_name.size() > 80 || !parse_u32(argv[1], parent_pid)) {
+        mapping_name.size() > 80 || parsed.ec != std::errc {} || parsed.ptr != event_end || !inherited_event_value) {
       return 2;
     }
 
-    HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, parent_pid);
+    HANDLE lifetime_event = reinterpret_cast<HANDLE>(inherited_event_value);
     HANDLE mapping = OpenFileMappingW(FILE_MAP_WRITE, FALSE, mapping_name.c_str());
-    if (!parent || !mapping) {
-      if (parent) CloseHandle(parent);
-      if (mapping) CloseHandle(mapping);
-      return 3;
-    }
+    if (!mapping) return 32;
     auto *state = static_cast<shared_state_t *>(MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, sizeof(shared_state_t)));
     if (!state) {
       CloseHandle(mapping);
-      CloseHandle(parent);
-      return 3;
+      CloseHandle(lifetime_event);
+      return 33;
     }
 
     const DWORD session_id = WTSGetActiveConsoleSessionId();
-    while (WaitForSingleObject(parent, sample_period_ms) == WAIT_TIMEOUT) {
+    while (WaitForSingleObject(lifetime_event, sample_period_ms) == WAIT_TIMEOUT) {
       CURSORINFO info {};
       info.cbSize = sizeof(info);
       const bool valid = GetCursorInfo(&info) != FALSE;
@@ -273,7 +326,7 @@ namespace platf::cursor_broker {
 
     UnmapViewOfFile(state);
     CloseHandle(mapping);
-    CloseHandle(parent);
+    CloseHandle(lifetime_event);
     return 0;
   }
 
