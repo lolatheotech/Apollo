@@ -249,6 +249,33 @@ namespace proc {
   }
 
   int proc_t::execute(const ctx_t& app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+    // The primary LoLa monitor stream owns the application and virtual-display
+    // lifecycle. Secondary streams attach to the display slots preallocated by
+    // the primary launch and must not terminate or replace that shared state.
+    if (launch_session && launch_session->monitor_count > 1 && launch_session->monitor_index > 0) {
+      uint32_t render_width = launch_session->width ? launch_session->width : 1920;
+      uint32_t render_height = launch_session->height ? launch_session->height : 1080;
+      int scale_factor = app.scale_factor != 100 ? app.scale_factor : launch_session->scale_factor;
+      if (scale_factor != 100) {
+        render_width = static_cast<uint32_t>(render_width * (scale_factor / 100.0f)) & ~1U;
+        render_height = static_cast<uint32_t>(render_height * (scale_factor / 100.0f)) & ~1U;
+      }
+      launch_session->width = render_width;
+      launch_session->height = render_height;
+
+      if (prepare_additional_virtual_display(launch_session)) {
+        BOOST_LOG(error) << "LoLa secondary monitor slot [" << launch_session->monitor_index
+                         << "] could not attach to its preallocated virtual display";
+        return 503;
+      }
+
+      BOOST_LOG(info) << "LoLa secondary monitor slot [" << launch_session->monitor_index
+                      << "] attached to " << launch_session->display_name
+                      << " without replacing the primary application lifecycle";
+      display_device::configure_display(config::video, *launch_session);
+      return 0;
+    }
+
     if (_app_id == input_only_app_id) {
       terminate(false, false);
       std::this_thread::sleep_for(1s);
