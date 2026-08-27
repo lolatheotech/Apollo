@@ -181,11 +181,33 @@ namespace proc {
       return 0;
     }
 
+    uint32_t render_width = launch_session->width ? launch_session->width : 1920;
+    uint32_t render_height = launch_session->height ? launch_session->height : 1080;
+    if (launch_session->scale_factor != 100) {
+      render_width = static_cast<uint32_t>(render_width * (launch_session->scale_factor / 100.0f)) & ~1U;
+      render_height = static_cast<uint32_t>(render_height * (launch_session->scale_factor / 100.0f)) & ~1U;
+    }
+
+    int target_fps = launch_session->fps ? launch_session->fps : 60000;
+    if (target_fps < 1000) {
+      target_fps *= 1000;
+    }
+    if (config::video.double_refreshrate) {
+      target_fps *= 2;
+    }
+
     auto existing = _additional_virtual_displays.find(launch_session->monitor_index);
     if (existing != _additional_virtual_displays.end()) {
       launch_session->virtual_display = true;
       launch_session->display_guid = existing->second.first;
       launch_session->display_name = existing->second.second;
+      auto vdisplay_name = platf::from_utf8(launch_session->display_name);
+      VDISPLAY::changeDisplaySettings(vdisplay_name.c_str(), render_width, render_height, target_fps);
+      if (config::video.isolated_virtual_display_option) {
+        VDISPLAY::changeDisplaySettings2(vdisplay_name.c_str(), render_width, render_height, target_fps, true);
+      }
+      BOOST_LOG(info) << "LoLa virtual display for monitor slot [" << launch_session->monitor_index
+                      << "] updated to [" << render_width << 'x' << render_height << '@' << target_fps << "]";
       return 0;
     }
 
@@ -204,21 +226,6 @@ namespace proc {
     device_uuid.b64[1] ^= static_cast<uint64_t>(launch_session->monitor_index);
     auto device_uuid_str = device_uuid.string();
     memcpy(&launch_session->display_guid, &device_uuid, sizeof(GUID));
-
-    uint32_t render_width = launch_session->width ? launch_session->width : 1920;
-    uint32_t render_height = launch_session->height ? launch_session->height : 1080;
-    if (launch_session->scale_factor != 100) {
-      render_width = static_cast<uint32_t>(render_width * (launch_session->scale_factor / 100.0f)) & ~1U;
-      render_height = static_cast<uint32_t>(render_height * (launch_session->scale_factor / 100.0f)) & ~1U;
-    }
-
-    int target_fps = launch_session->fps ? launch_session->fps : 60000;
-    if (target_fps < 1000) {
-      target_fps *= 1000;
-    }
-    if (config::video.double_refreshrate) {
-      target_fps *= 2;
-    }
 
     auto device_name = launch_session->device_name + " monitor " + std::to_string(launch_session->monitor_index + 1);
     auto vdisplay_name = VDISPLAY::createVirtualDisplay(
@@ -253,15 +260,8 @@ namespace proc {
     // lifecycle. Secondary streams attach to the display slots preallocated by
     // the primary launch and must not terminate or replace that shared state.
     if (launch_session && launch_session->monitor_count > 1 && launch_session->monitor_index > 0) {
-      uint32_t render_width = launch_session->width ? launch_session->width : 1920;
-      uint32_t render_height = launch_session->height ? launch_session->height : 1080;
       int scale_factor = app.scale_factor != 100 ? app.scale_factor : launch_session->scale_factor;
-      if (scale_factor != 100) {
-        render_width = static_cast<uint32_t>(render_width * (scale_factor / 100.0f)) & ~1U;
-        render_height = static_cast<uint32_t>(render_height * (scale_factor / 100.0f)) & ~1U;
-      }
-      launch_session->width = render_width;
-      launch_session->height = render_height;
+      launch_session->scale_factor = scale_factor;
 
       if (prepare_additional_virtual_display(launch_session)) {
         BOOST_LOG(error) << "LoLa secondary monitor slot [" << launch_session->monitor_index
