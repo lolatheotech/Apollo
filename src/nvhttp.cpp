@@ -45,6 +45,7 @@
 #include "zwpad.h"
 
 #ifdef _WIN32
+  #include <windows.h>
   #include "platform/windows/virtual_display.h"
 #endif
 
@@ -1703,9 +1704,35 @@ namespace nvhttp {
       return;
     }
 
+    bool visible = false;
+    std::string shape = "unsupported";
+    std::uint64_t sequence = 0;
+#ifdef _WIN32
+    CURSORINFO cursor_info {};
+    cursor_info.cbSize = sizeof(cursor_info);
+    if (GetCursorInfo(&cursor_info)) {
+      visible = (cursor_info.flags & CURSOR_SHOWING) != 0;
+      sequence = reinterpret_cast<std::uintptr_t>(cursor_info.hCursor);
+      const std::pair<LPCSTR, const char *> known_shapes[] = {
+        {IDC_ARROW, "arrow"}, {IDC_IBEAM, "ibeam"}, {IDC_WAIT, "wait"},
+        {IDC_CROSS, "crosshair"}, {IDC_UPARROW, "uparrow"},
+        {IDC_SIZENWSE, "size_nwse"}, {IDC_SIZENESW, "size_nesw"},
+        {IDC_SIZEWE, "size_we"}, {IDC_SIZENS, "size_ns"},
+        {IDC_SIZEALL, "size_all"}, {IDC_NO, "forbidden"},
+        {IDC_HAND, "hand"}, {IDC_APPSTARTING, "busy"}, {IDC_HELP, "help"}
+      };
+      for (const auto &[cursor_id, cursor_name] : known_shapes) {
+        if (cursor_info.hCursor == LoadCursorA(nullptr, cursor_id)) {
+          shape = cursor_name;
+          break;
+        }
+      }
+    }
+#endif
+
     nlohmann::json payload {
       {"schemaVersion", 1}, {"monitorIndex", std::stoi(std::string(monitor))},
-      {"sequence", 0}, {"visible", false}, {"shape", "unsupported"},
+      {"sequence", sequence}, {"visible", visible}, {"shape", shape},
       {"width", 0}, {"height", 0}, {"hotspotX", 0}, {"hotspotY", 0}
     };
     SimpleWeb::CaseInsensitiveMultimap headers;
