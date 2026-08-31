@@ -239,6 +239,21 @@ namespace proc {
 
     BOOST_LOG(info) << "LoLa virtual display for monitor slot [" << launch_session->monitor_index << "] created at " << vdisplay_name;
     VDISPLAY::changeDisplaySettings(vdisplay_name.c_str(), render_width, render_height, target_fps);
+    if (_launch_session && !_launch_session->display_name.empty()) {
+      DEVMODEW primary_mode{};
+      primary_mode.dmSize = sizeof(primary_mode);
+      const auto primary_name = platf::from_utf8(_launch_session->display_name);
+      if (VDISPLAY::getDeviceSettings(primary_name.c_str(), primary_mode) == ERROR_SUCCESS) {
+        const auto x = primary_mode.dmPosition.x + launch_session->monitor_x;
+        const auto y = primary_mode.dmPosition.y + launch_session->monitor_y;
+        const auto position_result = VDISPLAY::changeDisplayPosition(vdisplay_name.c_str(), x, y);
+        if (position_result != DISP_CHANGE_SUCCESSFUL) {
+          BOOST_LOG(error) << "LoLa failed to position virtual display slot [" << launch_session->monitor_index
+                           << "] at [" << x << ',' << y << "] error=" << position_result;
+          return 503;
+        }
+      }
+    }
     if (config::video.isolated_virtual_display_option) {
       VDISPLAY::changeDisplaySettings2(vdisplay_name.c_str(), render_width, render_height, target_fps, true);
     }
@@ -272,7 +287,8 @@ namespace proc {
       BOOST_LOG(info) << "LoLa secondary monitor slot [" << launch_session->monitor_index
                       << "] attached to " << launch_session->display_name
                       << " without replacing the primary application lifecycle";
-      display_device::configure_display(config::video, *launch_session);
+      BOOST_LOG(info) << "LoLa multi-monitor topology is already active; skipping single-display topology configuration for secondary slot ["
+                      << launch_session->monitor_index << ']';
       return 0;
     }
 
@@ -453,7 +469,12 @@ namespace proc {
       }
     }
 
-    display_device::configure_display(config::video, *launch_session);
+    if (launch_session->monitor_count > 1) {
+      BOOST_LOG(info) << "LoLa preserving active topology for [" << launch_session->monitor_count
+                      << "] virtual displays instead of applying the single-display privacy policy";
+    } else {
+      display_device::configure_display(config::video, *launch_session);
+    }
 
     // We should not preserve display state when using virtual display.
     // It is already handled by Windows properly.

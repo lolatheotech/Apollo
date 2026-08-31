@@ -24,6 +24,7 @@ namespace VDISPLAY {
 
 	LONG getDeviceSettings(const wchar_t* deviceName, DEVMODEW& devMode);
 	LONG changeDisplaySettings(const wchar_t* deviceName, int width, int height, int refresh_rate);
+	LONG changeDisplayPosition(const wchar_t* deviceName, int x, int y);
 	LONG changeDisplaySettings2(const wchar_t* deviceName, int width, int height, int refresh_rate, bool bApplyIsolated=false);	
 	std::wstring getPrimaryDisplay();
 	bool setPrimaryDisplay(const wchar_t* primaryDeviceName);

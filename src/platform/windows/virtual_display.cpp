@@ -16,6 +16,22 @@
 
 using namespace SUDOVDA;
 
+LONG VDISPLAY::changeDisplayPosition(const wchar_t* deviceName, int x, int y) {
+	DEVMODEW mode{};
+	mode.dmSize = sizeof(mode);
+	if (!EnumDisplaySettingsW(deviceName, ENUM_CURRENT_SETTINGS, &mode)) {
+		return DISP_CHANGE_FAILED;
+	}
+	mode.dmPosition.x = x;
+	mode.dmPosition.y = y;
+	mode.dmFields = DM_POSITION;
+	const auto result = ChangeDisplaySettingsExW(deviceName, &mode, nullptr, CDS_UPDATEREGISTRY | CDS_NORESET, nullptr);
+	if (result != DISP_CHANGE_SUCCESSFUL) {
+		return result;
+	}
+	return ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
+}
+
 namespace VDISPLAY {
 // {dff7fd29-5b75-41d1-9731-b32a17a17104}
 // static const GUID DEFAULT_DISPLAY_GUID = { 0xdff7fd29, 0x5b75, 0x41d1, { 0x97, 0x31, 0xb3, 0x2a, 0x17, 0xa1, 0x71, 0x04 } };

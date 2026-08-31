@@ -461,6 +461,22 @@ namespace nvhttp {
     if (launch_session->monitor_index >= launch_session->monitor_count) {
       launch_session->monitor_index = 0;
     }
+    const auto parse_monitor_coordinate = [&](const char *name) {
+      const auto value = get_arg(args, name, "0");
+      try {
+        std::size_t consumed = 0;
+        const auto parsed = std::stol(value, &consumed, 10);
+        if (consumed != value.size() || parsed < -32768 || parsed > 32767) {
+          throw std::out_of_range("monitor coordinate");
+        }
+        return static_cast<int32_t>(parsed);
+      } catch (const std::exception &) {
+        BOOST_LOG(warning) << "Rejected invalid LoLa monitor coordinate "sv << name << '=' << value;
+        return int32_t {0};
+      }
+    };
+    launch_session->monitor_x = parse_monitor_coordinate("lola_monitor_x");
+    launch_session->monitor_y = parse_monitor_coordinate("lola_monitor_y");
 
     std::stringstream mode;
     if (named_cert_p->display_mode.empty()) {

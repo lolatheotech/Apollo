@@ -56,6 +56,8 @@ namespace rtsp_stream {
     // Apollo never assigns monitors round-robin.
     uint32_t monitor_index {0};
     uint32_t monitor_count {1};
+    int32_t monitor_x {0};
+    int32_t monitor_y {0};
 
 
     std::optional<crypto::cipher::gcm_t> rtsp_cipher;
