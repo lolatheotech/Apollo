@@ -1656,7 +1656,7 @@ namespace proc {
       ctx.use_app_identity = false;
       ctx.per_client_app_identity = false;
       ctx.allow_client_commands = false;
-      ctx.terminate_on_pause = false;
+      ctx.terminate_on_pause = true;
 
       ctx.elevated = false;
       ctx.auto_detach = true;
