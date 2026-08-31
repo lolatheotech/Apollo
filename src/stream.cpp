@@ -1986,6 +1986,11 @@ namespace stream {
         return;
       }
 
+      // A failed pre-render session never establishes its control peer, so the
+      // normal control-path cleanup cannot release the pending RTSP launch.
+      // Release it here to make a bounded retry immediately claim the RTSP slot.
+      rtsp_stream::launch_session_clear(session.launch_session_id);
+
       session.shutdown_event->raise(true);
     }
 
@@ -2088,6 +2093,14 @@ namespace stream {
 
     int start(session_t &session, const std::string &addr_string) {
       session.input = input::alloc(session.mail);
+
+      // Keep one multiplexed UDP broadcast context alive for the Apollo
+      // process lifetime after the first stream. This prevents a retry race
+      // from tearing down and rebinding 47998-48000 between monitor sessions.
+      static auto broadcast_lifetime_ref = broadcast.ref();
+      if (!broadcast_lifetime_ref) {
+        return -1;
+      }
 
       session.broadcast_ref = broadcast.ref();
       if (!session.broadcast_ref) {
