@@ -13,7 +13,9 @@
 #endif
 
 // standard includes
+#include <condition_variable>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <unordered_map>
 
@@ -154,6 +156,8 @@ namespace proc {
 
   #ifdef _WIN32
     std::map<uint32_t, std::pair<GUID, std::string>> _additional_virtual_displays;
+    std::shared_ptr<std::mutex> _multi_monitor_display_mutex {std::make_shared<std::mutex>()};
+    std::shared_ptr<std::condition_variable> _multi_monitor_display_ready {std::make_shared<std::condition_variable>()};
   #endif
 
     std::vector<ctx_t> _apps;

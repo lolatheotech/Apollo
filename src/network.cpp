@@ -164,7 +164,13 @@ namespace net {
     enet_address_set_port(&addr, port);
 
     // Maximum of 128 clients, which should be enough for anyone
-    auto host = host_t {enet_host_create(af == IPV4 ? AF_INET : AF_INET6, &addr, 128, 0, 0, 0)};
+    auto raw_host = enet_host_create(af == IPV4 ? AF_INET : AF_INET6, &addr, 128, 0, 0, 0);
+    if (!raw_host) {
+      BOOST_LOG(error) << "Unable to create ENet control host on port [" << port
+                       << "]; the address may already be bound";
+      return {};
+    }
+    auto host = host_t {raw_host};
 
     // Enable opportunistic QoS tagging (automatically disables if the network appears to drop tagged packets)
     enet_socket_set_option(host->socket, ENET_SOCKOPT_QOS, 1);

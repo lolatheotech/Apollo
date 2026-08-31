@@ -203,6 +203,21 @@ namespace proc {
       launch_session->display_name = existing->second.second;
       auto vdisplay_name = platf::from_utf8(launch_session->display_name);
       VDISPLAY::changeDisplaySettings(vdisplay_name.c_str(), render_width, render_height, target_fps);
+      if (_launch_session && !_launch_session->display_name.empty()) {
+        DEVMODEW primary_mode{};
+        primary_mode.dmSize = sizeof(primary_mode);
+        const auto primary_name = platf::from_utf8(_launch_session->display_name);
+        if (VDISPLAY::getDeviceSettings(primary_name.c_str(), primary_mode) == ERROR_SUCCESS) {
+          const auto x = primary_mode.dmPosition.x + launch_session->monitor_x;
+          const auto y = primary_mode.dmPosition.y + launch_session->monitor_y;
+          const auto position_result = VDISPLAY::changeDisplayPosition(vdisplay_name.c_str(), x, y);
+          if (position_result != DISP_CHANGE_SUCCESSFUL) {
+            BOOST_LOG(error) << "LoLa failed to reposition virtual display slot [" << launch_session->monitor_index
+                             << "] at [" << x << ',' << y << "] error=" << position_result;
+            return 503;
+          }
+        }
+      }
       if (config::video.isolated_virtual_display_option) {
         VDISPLAY::changeDisplaySettings2(vdisplay_name.c_str(), render_width, render_height, target_fps, true);
       }
@@ -271,10 +286,33 @@ namespace proc {
   }
 
   int proc_t::execute(const ctx_t& app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+#ifdef _WIN32
+    std::unique_lock<std::mutex> multi_monitor_display_lock;
+    if (launch_session && launch_session->monitor_count > 1) {
+      multi_monitor_display_lock = std::unique_lock<std::mutex>(*_multi_monitor_display_mutex);
+    }
+#endif
+
     // The primary LoLa monitor stream owns the application and virtual-display
-    // lifecycle. Secondary streams attach to the display slots preallocated by
-    // the primary launch and must not terminate or replace that shared state.
+    // lifecycle. Secondary streams wait until monitor zero has atomically
+    // prepared the complete topology, even if their requests arrive first.
     if (launch_session && launch_session->monitor_count > 1 && launch_session->monitor_index > 0) {
+#ifdef _WIN32
+      const auto topology_ready = _multi_monitor_display_ready->wait_for(
+        multi_monitor_display_lock,
+        std::chrono::seconds(10),
+        [&]() {
+          return _launch_session &&
+                 _launch_session->monitor_count == launch_session->monitor_count &&
+                 _additional_virtual_displays.contains(launch_session->monitor_index);
+        }
+      );
+      if (!topology_ready) {
+        BOOST_LOG(error) << "LoLa timed out waiting for the primary multi-monitor topology before attaching slot ["
+                         << launch_session->monitor_index << ']';
+        return 503;
+      }
+#endif
       int scale_factor = app.scale_factor != 100 ? app.scale_factor : launch_session->scale_factor;
       launch_session->scale_factor = scale_factor;
 
@@ -462,12 +500,21 @@ namespace proc {
         additional_session->scale_factor = launch_session->scale_factor;
         additional_session->monitor_count = launch_session->monitor_count;
         additional_session->monitor_index = monitor_index;
+        additional_session->monitor_x = launch_session->monitor_x + static_cast<int32_t>(monitor_index * launch_session->width);
+        additional_session->monitor_y = launch_session->monitor_y;
         if (prepare_additional_virtual_display(additional_session)) {
           BOOST_LOG(error) << "LoLa failed to prepare virtual display for monitor slot [" << monitor_index << ']';
           return 503;
         }
       }
     }
+
+#ifdef _WIN32
+    if (multi_monitor_display_lock.owns_lock()) {
+      _multi_monitor_display_ready->notify_all();
+      multi_monitor_display_lock.unlock();
+    }
+#endif
 
     if (launch_session->monitor_count > 1) {
       BOOST_LOG(info) << "LoLa preserving active topology for [" << launch_session->monitor_count
