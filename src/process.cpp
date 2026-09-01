@@ -506,6 +506,11 @@ namespace proc {
           BOOST_LOG(error) << "LoLa failed to prepare virtual display for monitor slot [" << monitor_index << ']';
           return 503;
         }
+        BOOST_LOG(info) << "LoLa virtual display slot [" << monitor_index
+                        << "] is enumerated and ready; allowing the display driver to settle before the next slot";
+        if (monitor_index + 1 < launch_session->monitor_count) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(750));
+        }
       }
     }
 
