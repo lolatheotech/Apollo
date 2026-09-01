@@ -704,7 +704,7 @@ std::wstring createVirtualDisplay(
 		UINT all_path_count = 0;
 		UINT all_mode_count = 0;
 		LONG topology_result = ERROR_NOT_FOUND;
-		const UINT32 query_flags = QDC_ALL_PATHS | QDC_VIRTUAL_MODE_AWARE;
+		const UINT32 query_flags = QDC_ALL_PATHS;
 		if (!GetDisplayConfigBufferSizes(query_flags, &all_path_count, &all_mode_count)) {
 			std::vector<DISPLAYCONFIG_PATH_INFO> all_paths(all_path_count);
 			std::vector<DISPLAYCONFIG_MODE_INFO> all_modes(all_mode_count);
@@ -746,6 +746,45 @@ std::wstring createVirtualDisplay(
 						if (source_in_use)
 							continue;
 
+						const auto template_path = std::find_if(
+							selected_paths.begin(), selected_paths.end(),
+							[&output, &all_modes](const DISPLAYCONFIG_PATH_INFO& active_path) {
+								return active_path.targetInfo.adapterId.HighPart == output.AdapterLuid.HighPart &&
+									active_path.targetInfo.adapterId.LowPart == output.AdapterLuid.LowPart &&
+									active_path.sourceInfo.modeInfoIdx != DISPLAYCONFIG_PATH_MODE_IDX_INVALID &&
+									active_path.targetInfo.modeInfoIdx != DISPLAYCONFIG_PATH_MODE_IDX_INVALID &&
+									active_path.sourceInfo.modeInfoIdx < all_modes.size() &&
+									active_path.targetInfo.modeInfoIdx < all_modes.size();
+							}
+						);
+						if (template_path == selected_paths.end())
+							continue;
+
+						auto source_mode = all_modes[template_path->sourceInfo.modeInfoIdx];
+						auto target_mode = all_modes[template_path->targetInfo.modeInfoIdx];
+						LONG next_x = 0;
+						for (const auto& active_path : selected_paths) {
+							if (active_path.sourceInfo.modeInfoIdx == DISPLAYCONFIG_PATH_MODE_IDX_INVALID ||
+								active_path.sourceInfo.modeInfoIdx >= all_modes.size())
+								continue;
+							const auto& active_mode = all_modes[active_path.sourceInfo.modeInfoIdx];
+							next_x = (std::max)(
+								next_x,
+								active_mode.sourceMode.position.x + static_cast<LONG>(active_mode.sourceMode.width)
+							);
+						}
+
+						source_mode.adapterId = path.sourceInfo.adapterId;
+						source_mode.id = path.sourceInfo.id;
+						source_mode.sourceMode.position = {next_x, 0};
+						source_mode.sourceMode.width = width;
+						source_mode.sourceMode.height = height;
+						target_mode.adapterId = path.targetInfo.adapterId;
+						target_mode.id = path.targetInfo.id;
+						path.sourceInfo.modeInfoIdx = static_cast<UINT32>(all_modes.size());
+						all_modes.emplace_back(source_mode);
+						path.targetInfo.modeInfoIdx = static_cast<UINT32>(all_modes.size());
+						all_modes.emplace_back(target_mode);
 						path.flags |= DISPLAYCONFIG_PATH_ACTIVE;
 						BOOST_LOG(info) << "LoLa activating allocated display target=" << output.TargetId
 						                << " source=" << path.sourceInfo.id
@@ -758,17 +797,12 @@ std::wstring createVirtualDisplay(
 				}
 
 				if (found_target) {
-					for (auto& path : selected_paths) {
-						path.sourceInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
-						path.targetInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
-					}
 					topology_result = SetDisplayConfig(
 						static_cast<UINT32>(selected_paths.size()), selected_paths.data(),
-						0, nullptr,
+						static_cast<UINT32>(all_modes.size()), all_modes.data(),
 						SDC_APPLY
 							| SDC_USE_SUPPLIED_DISPLAY_CONFIG
 							| SDC_ALLOW_CHANGES
-							| SDC_VIRTUAL_MODE_AWARE
 					);
 				}
 			}
