@@ -6,6 +6,8 @@
 #include <cfgmgr32.h>
 #include <stdio.h>
 #include <string.h>
+#include <string>
+#include <vector>
 #include "sudovda-ioctl.h"
 
 #ifdef _MSC_VER
@@ -212,7 +214,35 @@ static const bool PingDriver(HANDLE hDevice) {
 	return success;
 }
 
-static const bool GetAddedDisplayName(const VIRTUAL_DISPLAY_ADD_OUT& addedDisplay, wchar_t* deviceName) {
+static std::vector<std::wstring> GetActiveDisplayNames() {
+	UINT pathCount = 0;
+	UINT modeCount = 0;
+	std::vector<std::wstring> names;
+	if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount))
+		return names;
+
+	std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+	std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+	if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr))
+		return names;
+
+	for (const auto& path : paths) {
+		DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
+		sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+		sourceName.header.size = sizeof(DISPLAYCONFIG_SOURCE_DEVICE_NAME);
+		sourceName.header.adapterId = path.sourceInfo.adapterId;
+		sourceName.header.id = path.sourceInfo.id;
+		if (!DisplayConfigGetDeviceInfo((DISPLAYCONFIG_DEVICE_INFO_HEADER*)&sourceName) && sourceName.viewGdiDeviceName[0])
+			names.emplace_back(sourceName.viewGdiDeviceName);
+	}
+	return names;
+}
+
+static const bool GetAddedDisplayName(
+	const VIRTUAL_DISPLAY_ADD_OUT& addedDisplay,
+	wchar_t* deviceName,
+	const std::vector<std::wstring>& namesBeforeAdd = {}
+) {
 	// get all paths
 	UINT pathCount;
 	UINT modeCount;
@@ -224,26 +254,27 @@ static const bool GetAddedDisplayName(const VIRTUAL_DISPLAY_ADD_OUT& addedDispla
 	if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr))
 		return 0;
 
-	auto path = std::find_if(paths.begin(), paths.end(), [&addedDisplay](DISPLAYCONFIG_PATH_INFO _path) {
-		return _path.targetInfo.id == addedDisplay.TargetId;
-	});
+	for (const auto& path : paths) {
+		if (path.targetInfo.id != addedDisplay.TargetId ||
+			path.targetInfo.adapterId.HighPart != addedDisplay.AdapterLuid.HighPart ||
+			path.targetInfo.adapterId.LowPart != addedDisplay.AdapterLuid.LowPart)
+			continue;
 
-	if (path == paths.end()) {
-		return false;
+		DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
+		sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+		sourceName.header.size = sizeof(DISPLAYCONFIG_SOURCE_DEVICE_NAME);
+		sourceName.header.adapterId = path.sourceInfo.adapterId;
+		sourceName.header.id = path.sourceInfo.id;
+		if (DisplayConfigGetDeviceInfo((DISPLAYCONFIG_DEVICE_INFO_HEADER*)&sourceName) || !sourceName.viewGdiDeviceName[0])
+			continue;
+		if (std::find(namesBeforeAdd.begin(), namesBeforeAdd.end(), sourceName.viewGdiDeviceName) != namesBeforeAdd.end())
+			continue;
+
+		wcscpy_s(deviceName, CCHDEVICENAME, sourceName.viewGdiDeviceName);
+		return true;
 	}
 
-	DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
-	sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-	sourceName.header.size = sizeof(DISPLAYCONFIG_SOURCE_DEVICE_NAME);
-	sourceName.header.adapterId = addedDisplay.AdapterLuid;
-	sourceName.header.id = path->sourceInfo.id;
-	if (DisplayConfigGetDeviceInfo((DISPLAYCONFIG_DEVICE_INFO_HEADER*)&sourceName)) {
-		return false;
-	}
-
-	wcscpy_s(deviceName, CCHDEVICENAME, sourceName.viewGdiDeviceName);
-
-	return true;
+	return false;
 }
 
 #ifdef __cplusplus

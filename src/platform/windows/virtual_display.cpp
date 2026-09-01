@@ -685,6 +685,7 @@ std::wstring createVirtualDisplay(
 	constexpr uint32_t enumeration_timeout_ms = 10000;
 
 	for (uint32_t add_attempt = 1; add_attempt <= max_add_attempts; ++add_attempt) {
+		const auto active_names_before_add = GetActiveDisplayNames();
 		VIRTUAL_DISPLAY_ADD_OUT output{};
 		if (!AddVirtualDisplay(SUDOVDA_DRIVER_HANDLE, width, height, fps, guid, s_client_name, s_client_uid, output)) {
 			printf("[SUDOVDA] Failed to add virtual display (attempt %u/%u).\n", add_attempt, max_add_attempts);
@@ -697,7 +698,7 @@ std::wstring createVirtualDisplay(
 		uint32_t elapsed_ms = 0;
 		uint32_t retry_interval_ms = 20;
 		wchar_t device_name[CCHDEVICENAME]{};
-		while (!GetAddedDisplayName(output, device_name) && elapsed_ms < enumeration_timeout_ms) {
+		while (!GetAddedDisplayName(output, device_name, active_names_before_add) && elapsed_ms < enumeration_timeout_ms) {
 			Sleep(retry_interval_ms);
 			elapsed_ms += retry_interval_ms;
 			retry_interval_ms = (std::min)(retry_interval_ms * 2, 250U);
