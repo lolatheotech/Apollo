@@ -44,6 +44,7 @@ struct reserved_virtual_source_t {
 	GUID guid;
 	LUID adapter;
 	UINT32 source_id;
+	UINT32 target_id;
 };
 
 static std::mutex RESERVED_VIRTUAL_SOURCES_MUTEX;
@@ -59,6 +60,17 @@ static bool isVirtualSourceReserved(const LUID& adapter, UINT32 source_id) {
 				reserved.adapter.LowPart == adapter.LowPart;
 		}
 	);
+}
+
+static std::vector<reserved_virtual_source_t> getReservedVirtualSources(const LUID& adapter) {
+	std::lock_guard<std::mutex> lock(RESERVED_VIRTUAL_SOURCES_MUTEX);
+	std::vector<reserved_virtual_source_t> result;
+	for (const auto& reserved : RESERVED_VIRTUAL_SOURCES) {
+		if (reserved.adapter.HighPart == adapter.HighPart &&
+			reserved.adapter.LowPart == adapter.LowPart)
+			result.emplace_back(reserved);
+	}
+	return result;
 }
 
 static void releaseVirtualSource(const GUID& guid) {
@@ -109,7 +121,9 @@ static void reserveActiveVirtualSource(
 
 		releaseVirtualSource(guid);
 		std::lock_guard<std::mutex> lock(RESERVED_VIRTUAL_SOURCES_MUTEX);
-		RESERVED_VIRTUAL_SOURCES.push_back({guid, path.sourceInfo.adapterId, path.sourceInfo.id});
+		RESERVED_VIRTUAL_SOURCES.push_back({
+			guid, path.sourceInfo.adapterId, path.sourceInfo.id, allocation.TargetId
+		});
 		BOOST_LOG(info) << "LoLa reserved virtual display source=" << path.sourceInfo.id
 		                << " for allocation target=" << allocation.TargetId;
 		return;
@@ -801,6 +815,68 @@ std::wstring createVirtualDisplay(
 						path.targetInfo.adapterId.LowPart == output.AdapterLuid.LowPart;
 					if (exact_target)
 						found_target = true;
+				}
+
+				// A later driver allocation can temporarily remove an earlier owned
+				// target from the active topology. Rehydrate every reserved target
+				// before adding the new allocation so the final apply is complete.
+				for (const auto& reserved : getReservedVirtualSources(output.AdapterLuid)) {
+					const auto already_selected = std::any_of(
+						selected_paths.begin(), selected_paths.end(),
+						[&reserved](const DISPLAYCONFIG_PATH_INFO& selected) {
+							return selected.sourceInfo.id == reserved.source_id &&
+								selected.sourceInfo.adapterId.HighPart == reserved.adapter.HighPart &&
+								selected.sourceInfo.adapterId.LowPart == reserved.adapter.LowPart;
+						}
+					);
+					if (already_selected)
+						continue;
+
+					const auto dormant_path = std::find_if(
+						all_paths.begin(), all_paths.end(),
+						[&reserved](const DISPLAYCONFIG_PATH_INFO& path) {
+							return path.sourceInfo.id == reserved.source_id &&
+								path.sourceInfo.adapterId.HighPart == reserved.adapter.HighPart &&
+								path.sourceInfo.adapterId.LowPart == reserved.adapter.LowPart &&
+								path.targetInfo.id == reserved.target_id &&
+								path.targetInfo.adapterId.HighPart == reserved.adapter.HighPart &&
+								path.targetInfo.adapterId.LowPart == reserved.adapter.LowPart;
+						}
+					);
+					if (dormant_path == all_paths.end())
+						continue;
+
+					const auto template_path = std::find_if(
+						selected_paths.begin(), selected_paths.end(),
+						[&output, &all_modes](const DISPLAYCONFIG_PATH_INFO& active_path) {
+							return active_path.targetInfo.adapterId.HighPart == output.AdapterLuid.HighPart &&
+								active_path.targetInfo.adapterId.LowPart == output.AdapterLuid.LowPart &&
+								active_path.sourceInfo.modeInfoIdx != DISPLAYCONFIG_PATH_MODE_IDX_INVALID &&
+								active_path.targetInfo.modeInfoIdx != DISPLAYCONFIG_PATH_MODE_IDX_INVALID &&
+								active_path.sourceInfo.modeInfoIdx < all_modes.size() &&
+								active_path.targetInfo.modeInfoIdx < all_modes.size();
+						}
+					);
+					if (template_path == selected_paths.end())
+						continue;
+
+					auto restored_path = *dormant_path;
+					auto source_mode = all_modes[template_path->sourceInfo.modeInfoIdx];
+					auto target_mode = all_modes[template_path->targetInfo.modeInfoIdx];
+					source_mode.adapterId = restored_path.sourceInfo.adapterId;
+					source_mode.id = restored_path.sourceInfo.id;
+					source_mode.sourceMode.width = width;
+					source_mode.sourceMode.height = height;
+					target_mode.adapterId = restored_path.targetInfo.adapterId;
+					target_mode.id = restored_path.targetInfo.id;
+					restored_path.sourceInfo.modeInfoIdx = static_cast<UINT32>(all_modes.size());
+					all_modes.emplace_back(source_mode);
+					restored_path.targetInfo.modeInfoIdx = static_cast<UINT32>(all_modes.size());
+					all_modes.emplace_back(target_mode);
+					restored_path.flags |= DISPLAYCONFIG_PATH_ACTIVE;
+					selected_paths.emplace_back(restored_path);
+					BOOST_LOG(info) << "LoLa restored reserved display target=" << reserved.target_id
+					                << " on source=" << reserved.source_id;
 				}
 
 				if (!found_target) {
