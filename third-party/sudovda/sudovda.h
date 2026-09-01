@@ -245,6 +245,46 @@ static const bool GetAddedDisplayName(
 	std::size_t* newlyActiveCount = nullptr,
 	std::size_t* returnedAdapterCandidateCount = nullptr
 ) {
+	// Additional heads can be allocated successfully before Windows attaches
+	// them to the active desktop. Resolve the exact driver-returned target from
+	// the complete topology first; the caller can then apply its mode and attach
+	// that GDI source. Restrict this path to an exact adapter/target match.
+	UINT allPathCount = 0;
+	UINT allModeCount = 0;
+	if (!GetDisplayConfigBufferSizes(QDC_ALL_PATHS, &allPathCount, &allModeCount)) {
+		std::vector<DISPLAYCONFIG_PATH_INFO> allPaths(allPathCount);
+		std::vector<DISPLAYCONFIG_MODE_INFO> allModes(allModeCount);
+		if (!QueryDisplayConfig(
+			QDC_ALL_PATHS, &allPathCount, allPaths.data(),
+			&allModeCount, allModes.data(), nullptr
+		)) {
+			for (const auto& path : allPaths) {
+				const auto exactTarget =
+					path.targetInfo.id == addedDisplay.TargetId &&
+					path.targetInfo.adapterId.HighPart == addedDisplay.AdapterLuid.HighPart &&
+					path.targetInfo.adapterId.LowPart == addedDisplay.AdapterLuid.LowPart;
+				if (!exactTarget)
+					continue;
+
+				DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
+				sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+				sourceName.header.size = sizeof(DISPLAYCONFIG_SOURCE_DEVICE_NAME);
+				sourceName.header.adapterId = path.sourceInfo.adapterId;
+				sourceName.header.id = path.sourceInfo.id;
+				if (!DisplayConfigGetDeviceInfo((DISPLAYCONFIG_DEVICE_INFO_HEADER*)&sourceName) &&
+					sourceName.viewGdiDeviceName[0]) {
+					wcscpy_s(deviceName, CCHDEVICENAME, sourceName.viewGdiDeviceName);
+					wprintf(
+						L"[SUDOVDA] Resolved allocated target %u as %ls from %ls topology.\n",
+						addedDisplay.TargetId, deviceName,
+						(path.flags & DISPLAYCONFIG_PATH_ACTIVE) ? L"active" : L"inactive"
+					);
+					return true;
+				}
+			}
+		}
+	}
+
 	// get all paths
 	UINT pathCount;
 	UINT modeCount;
