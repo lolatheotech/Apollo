@@ -201,28 +201,9 @@ namespace proc {
       launch_session->virtual_display = true;
       launch_session->display_guid = existing->second.first;
       launch_session->display_name = existing->second.second;
-      auto vdisplay_name = platf::from_utf8(launch_session->display_name);
-      VDISPLAY::changeDisplaySettings(vdisplay_name.c_str(), render_width, render_height, target_fps);
-      if (_launch_session && !_launch_session->display_name.empty()) {
-        DEVMODEW primary_mode{};
-        primary_mode.dmSize = sizeof(primary_mode);
-        const auto primary_name = platf::from_utf8(_launch_session->display_name);
-        if (VDISPLAY::getDeviceSettings(primary_name.c_str(), primary_mode) == ERROR_SUCCESS) {
-          const auto x = primary_mode.dmPosition.x + launch_session->monitor_x;
-          const auto y = primary_mode.dmPosition.y + launch_session->monitor_y;
-          const auto position_result = VDISPLAY::changeDisplayPosition(vdisplay_name.c_str(), x, y);
-          if (position_result != DISP_CHANGE_SUCCESSFUL) {
-            BOOST_LOG(error) << "LoLa failed to reposition virtual display slot [" << launch_session->monitor_index
-                             << "] at [" << x << ',' << y << "] error=" << position_result;
-            return 503;
-          }
-        }
-      }
-      if (config::video.isolated_virtual_display_option) {
-        VDISPLAY::changeDisplaySettings2(vdisplay_name.c_str(), render_width, render_height, target_fps, true);
-      }
-      BOOST_LOG(info) << "LoLa virtual display for monitor slot [" << launch_session->monitor_index
-                      << "] updated to [" << render_width << 'x' << render_height << '@' << target_fps << "]";
+      BOOST_LOG(info) << "LoLa reusing prevalidated virtual display for monitor slot ["
+                      << launch_session->monitor_index << "] at " << launch_session->display_name
+                      << " without mutating the active multimonitor topology";
       return 0;
     }
 
