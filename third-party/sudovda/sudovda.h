@@ -241,7 +241,9 @@ static std::vector<std::wstring> GetActiveDisplayNames() {
 static const bool GetAddedDisplayName(
 	const VIRTUAL_DISPLAY_ADD_OUT& addedDisplay,
 	wchar_t* deviceName,
-	const std::vector<std::wstring>& namesBeforeAdd = {}
+	const std::vector<std::wstring>& namesBeforeAdd = {},
+	std::size_t* newlyActiveCount = nullptr,
+	std::size_t* returnedAdapterCandidateCount = nullptr
 ) {
 	// get all paths
 	UINT pathCount;
@@ -281,6 +283,11 @@ static const bool GetAddedDisplayName(
 			return true;
 		}
 	}
+
+	if (newlyActiveCount)
+		*newlyActiveCount = newlyActiveNames.size();
+	if (returnedAdapterCandidateCount)
+		*returnedAdapterCandidateCount = newlyActiveNamesOnReturnedAdapter.size();
 
 	// Some driver versions reuse a target ID for subsequent heads. Prefer a
 	// unique newly active display on the returned adapter before considering

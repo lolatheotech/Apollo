@@ -13,6 +13,7 @@
 #include <dxgi1_6.h>
 
 #include "virtual_display.h"
+#include "src/logging.h"
 
 using namespace SUDOVDA;
 
@@ -688,6 +689,8 @@ std::wstring createVirtualDisplay(
 		const auto active_names_before_add = GetActiveDisplayNames();
 		VIRTUAL_DISPLAY_ADD_OUT output{};
 		if (!AddVirtualDisplay(SUDOVDA_DRIVER_HANDLE, width, height, fps, guid, s_client_name, s_client_uid, output)) {
+			BOOST_LOG(error) << "LoLa virtual display driver add failed on attempt [" << add_attempt << '/'
+			                 << max_add_attempts << "] win32_error=" << GetLastError();
 			printf("[SUDOVDA] Failed to add virtual display (attempt %u/%u).\n", add_attempt, max_add_attempts);
 			if (add_attempt < max_add_attempts) {
 				Sleep(250U * add_attempt);
@@ -698,7 +701,12 @@ std::wstring createVirtualDisplay(
 		uint32_t elapsed_ms = 0;
 		uint32_t retry_interval_ms = 20;
 		wchar_t device_name[CCHDEVICENAME]{};
-		while (!GetAddedDisplayName(output, device_name, active_names_before_add) && elapsed_ms < enumeration_timeout_ms) {
+		std::size_t newly_active_count = 0;
+		std::size_t returned_adapter_candidate_count = 0;
+		while (!GetAddedDisplayName(
+			output, device_name, active_names_before_add,
+			&newly_active_count, &returned_adapter_candidate_count
+		) && elapsed_ms < enumeration_timeout_ms) {
 			Sleep(retry_interval_ms);
 			elapsed_ms += retry_interval_ms;
 			retry_interval_ms = (std::min)(retry_interval_ms * 2, 250U);
@@ -710,6 +718,12 @@ std::wstring createVirtualDisplay(
 			return std::wstring(device_name);
 		}
 
+		BOOST_LOG(error) << "LoLa virtual display enumeration timed out on attempt [" << add_attempt << '/'
+		                 << max_add_attempts << "] returned_target=" << output.TargetId
+		                 << " returned_adapter_high=" << output.AdapterLuid.HighPart
+		                 << " returned_adapter_low=" << output.AdapterLuid.LowPart
+		                 << " newly_active=" << newly_active_count
+		                 << " returned_adapter_candidates=" << returned_adapter_candidate_count;
 		printf("[SUDOVDA] Timed out waiting for virtual display enumeration (attempt %u/%u); rolling back.\n", add_attempt, max_add_attempts);
 		RemoveVirtualDisplay(SUDOVDA_DRIVER_HANDLE, guid);
 		if (add_attempt < max_add_attempts) {
