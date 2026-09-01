@@ -881,6 +881,20 @@ std::wstring createVirtualDisplay(
 						SDC_APPLY
 							| SDC_USE_SUPPLIED_DISPLAY_CONFIG
 					);
+					if (topology_result == ERROR_SUCCESS) {
+						// The IDD driver can perform a delayed automatic attachment after
+						// DeviceIoControl returns, overwriting the requested source. Reapply
+						// the complete topology after that settle window.
+						Sleep(750);
+						topology_result = SetDisplayConfig(
+							static_cast<UINT32>(selected_paths.size()), selected_paths.data(),
+							static_cast<UINT32>(all_modes.size()), all_modes.data(),
+							SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG
+						);
+						if (topology_result != ERROR_SUCCESS)
+							BOOST_LOG(warning) << "LoLa failed to reapply display topology after driver settle, error="
+							                   << topology_result;
+					}
 				}
 			}
 		}
