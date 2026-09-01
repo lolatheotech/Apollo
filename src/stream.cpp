@@ -1127,8 +1127,6 @@ namespace stream {
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
-      bool has_session_awaiting_peer = false;
-
       {
         auto lg = server->_sessions.lock();
 
@@ -1164,12 +1162,7 @@ namespace stream {
             continue;
           }
 
-          // Remember if we have a session that's waiting for a peer to connect to the
-          // control stream. This ensures the clients are properly notified even when
-          // the app terminates before they finish connecting.
-          if (!session->control.peer) {
-            has_session_awaiting_peer = true;
-          } else {
+          if (session->control.peer) {
             auto &feedback_queue = session->control.feedback_queue;
             while (feedback_queue->peek()) {
               auto feedback_msg = feedback_queue->pop();
@@ -1187,12 +1180,6 @@ namespace stream {
 
           ++pos;
         })
-      }
-
-      // Don't break until any pending sessions either expire or connect
-      if (proc::proc.running() == 0 && !has_session_awaiting_peer) {
-        BOOST_LOG(info) << "Process terminated"sv;
-        break;
       }
 
       server->iterate(150ms);
