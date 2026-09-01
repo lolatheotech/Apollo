@@ -880,7 +880,6 @@ std::wstring createVirtualDisplay(
 						static_cast<UINT32>(all_modes.size()), all_modes.data(),
 						SDC_APPLY
 							| SDC_USE_SUPPLIED_DISPLAY_CONFIG
-							| SDC_ALLOW_CHANGES
 					);
 				}
 			}
