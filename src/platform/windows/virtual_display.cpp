@@ -698,18 +698,57 @@ std::wstring createVirtualDisplay(
 			continue;
 		}
 
-		// Windows can expose additional IDD heads as available but inactive.
-		// Ask the display manager to extend the desktop before resolving the
-		// newly allocated target to its GDI display name.
-		const auto topology_result = SetDisplayConfig(
-			0, nullptr, 0, nullptr,
-			SDC_APPLY | SDC_TOPOLOGY_EXTEND | SDC_VIRTUAL_MODE_AWARE
-		);
-		if (topology_result != ERROR_SUCCESS) {
-			BOOST_LOG(warning) << "LoLa failed to extend the display topology after virtual display allocation, error="
-			                   << topology_result;
-		} else {
+		// Additional IDD heads can be present in the complete topology without
+		// being attached to the desktop. Preserve all active paths and activate
+		// only the exact adapter/target pair returned by this allocation.
+		UINT all_path_count = 0;
+		UINT all_mode_count = 0;
+		LONG topology_result = ERROR_NOT_FOUND;
+		const UINT32 query_flags = QDC_ALL_PATHS | QDC_VIRTUAL_MODE_AWARE;
+		if (!GetDisplayConfigBufferSizes(query_flags, &all_path_count, &all_mode_count)) {
+			std::vector<DISPLAYCONFIG_PATH_INFO> all_paths(all_path_count);
+			std::vector<DISPLAYCONFIG_MODE_INFO> all_modes(all_mode_count);
+			if (!QueryDisplayConfig(
+				query_flags, &all_path_count, all_paths.data(),
+				&all_mode_count, all_modes.data(), nullptr
+			)) {
+				std::vector<DISPLAYCONFIG_PATH_INFO> selected_paths;
+				bool found_target = false;
+				for (auto path : all_paths) {
+					const auto exact_target =
+						path.targetInfo.id == output.TargetId &&
+						path.targetInfo.adapterId.HighPart == output.AdapterLuid.HighPart &&
+						path.targetInfo.adapterId.LowPart == output.AdapterLuid.LowPart;
+					if (exact_target) {
+						found_target = true;
+						path.flags |= DISPLAYCONFIG_PATH_ACTIVE;
+						BOOST_LOG(info) << "LoLa activating allocated display target=" << output.TargetId
+						                << " source=" << path.sourceInfo.id
+						                << " source_mode=" << path.sourceInfo.modeInfoIdx
+						                << " target_mode=" << path.targetInfo.modeInfoIdx;
+					}
+					if (exact_target || (path.flags & DISPLAYCONFIG_PATH_ACTIVE))
+						selected_paths.emplace_back(path);
+				}
+
+				if (found_target) {
+					topology_result = SetDisplayConfig(
+						static_cast<UINT32>(selected_paths.size()), selected_paths.data(),
+						all_mode_count, all_modes.data(),
+						SDC_APPLY
+							| SDC_USE_SUPPLIED_DISPLAY_CONFIG
+							| SDC_ALLOW_CHANGES
+							| SDC_VIRTUAL_MODE_AWARE
+					);
+				}
+			}
+		}
+
+		if (topology_result == ERROR_SUCCESS) {
 			Sleep(500);
+		} else {
+			BOOST_LOG(warning) << "LoLa failed to activate allocated display target=" << output.TargetId
+			                   << " error=" << topology_result;
 		}
 
 		uint32_t elapsed_ms = 0;
