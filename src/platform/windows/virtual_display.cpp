@@ -758,9 +758,13 @@ std::wstring createVirtualDisplay(
 				}
 
 				if (found_target) {
+					for (auto& path : selected_paths) {
+						path.sourceInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+						path.targetInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+					}
 					topology_result = SetDisplayConfig(
 						static_cast<UINT32>(selected_paths.size()), selected_paths.data(),
-						all_mode_count, all_modes.data(),
+						0, nullptr,
 						SDC_APPLY
 							| SDC_USE_SUPPLIED_DISPLAY_CONFIG
 							| SDC_ALLOW_CHANGES
