@@ -714,21 +714,47 @@ std::wstring createVirtualDisplay(
 			)) {
 				std::vector<DISPLAYCONFIG_PATH_INFO> selected_paths;
 				bool found_target = false;
-				for (auto path : all_paths) {
+				for (const auto& path : all_paths) {
+					if (!(path.flags & DISPLAYCONFIG_PATH_ACTIVE))
+						continue;
+					selected_paths.emplace_back(path);
 					const auto exact_target =
 						path.targetInfo.id == output.TargetId &&
 						path.targetInfo.adapterId.HighPart == output.AdapterLuid.HighPart &&
 						path.targetInfo.adapterId.LowPart == output.AdapterLuid.LowPart;
-					if (exact_target) {
+					if (exact_target)
 						found_target = true;
+				}
+
+				if (!found_target) {
+					for (auto path : all_paths) {
+						const auto exact_target =
+							path.targetInfo.id == output.TargetId &&
+							path.targetInfo.adapterId.HighPart == output.AdapterLuid.HighPart &&
+							path.targetInfo.adapterId.LowPart == output.AdapterLuid.LowPart;
+						if (!exact_target || (path.flags & DISPLAYCONFIG_PATH_ACTIVE))
+							continue;
+
+						const auto source_in_use = std::any_of(
+							selected_paths.begin(), selected_paths.end(),
+							[&path](const DISPLAYCONFIG_PATH_INFO& active_path) {
+								return active_path.sourceInfo.id == path.sourceInfo.id &&
+									active_path.sourceInfo.adapterId.HighPart == path.sourceInfo.adapterId.HighPart &&
+									active_path.sourceInfo.adapterId.LowPart == path.sourceInfo.adapterId.LowPart;
+							}
+						);
+						if (source_in_use)
+							continue;
+
 						path.flags |= DISPLAYCONFIG_PATH_ACTIVE;
 						BOOST_LOG(info) << "LoLa activating allocated display target=" << output.TargetId
 						                << " source=" << path.sourceInfo.id
 						                << " source_mode=" << path.sourceInfo.modeInfoIdx
 						                << " target_mode=" << path.targetInfo.modeInfoIdx;
-					}
-					if (exact_target || (path.flags & DISPLAYCONFIG_PATH_ACTIVE))
 						selected_paths.emplace_back(path);
+						found_target = true;
+						break;
+					}
 				}
 
 				if (found_target) {
