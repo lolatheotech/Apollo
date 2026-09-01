@@ -271,8 +271,12 @@ static const bool GetAddedDisplayName(
 				sourceName.header.size = sizeof(DISPLAYCONFIG_SOURCE_DEVICE_NAME);
 				sourceName.header.adapterId = path.sourceInfo.adapterId;
 				sourceName.header.id = path.sourceInfo.id;
+				const auto isActive = (path.flags & DISPLAYCONFIG_PATH_ACTIVE) != 0;
 				if (!DisplayConfigGetDeviceInfo((DISPLAYCONFIG_DEVICE_INFO_HEADER*)&sourceName) &&
-					sourceName.viewGdiDeviceName[0]) {
+					sourceName.viewGdiDeviceName[0] &&
+					isActive &&
+					std::find(namesBeforeAdd.begin(), namesBeforeAdd.end(), sourceName.viewGdiDeviceName) ==
+						namesBeforeAdd.end()) {
 					wcscpy_s(deviceName, CCHDEVICENAME, sourceName.viewGdiDeviceName);
 					wprintf(
 						L"[SUDOVDA] Resolved allocated target %u as %ls from %ls topology.\n",

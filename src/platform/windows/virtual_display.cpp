@@ -698,6 +698,20 @@ std::wstring createVirtualDisplay(
 			continue;
 		}
 
+		// Windows can expose additional IDD heads as available but inactive.
+		// Ask the display manager to extend the desktop before resolving the
+		// newly allocated target to its GDI display name.
+		const auto topology_result = SetDisplayConfig(
+			0, nullptr, 0, nullptr,
+			SDC_APPLY | SDC_TOPOLOGY_EXTEND | SDC_VIRTUAL_MODE_AWARE
+		);
+		if (topology_result != ERROR_SUCCESS) {
+			BOOST_LOG(warning) << "LoLa failed to extend the display topology after virtual display allocation, error="
+			                   << topology_result;
+		} else {
+			Sleep(500);
+		}
+
 		uint32_t elapsed_ms = 0;
 		uint32_t retry_interval_ms = 20;
 		wchar_t device_name[CCHDEVICENAME]{};
