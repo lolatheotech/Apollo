@@ -255,6 +255,7 @@ static const bool GetAddedDisplayName(
 		return 0;
 
 	std::vector<std::wstring> newlyActiveNames;
+	std::vector<std::wstring> newlyActiveNamesOnReturnedAdapter;
 	for (const auto& path : paths) {
 		DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
 		sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
@@ -265,21 +266,36 @@ static const bool GetAddedDisplayName(
 			continue;
 		if (std::find(namesBeforeAdd.begin(), namesBeforeAdd.end(), sourceName.viewGdiDeviceName) != namesBeforeAdd.end())
 			continue;
-		if (std::find(newlyActiveNames.begin(), newlyActiveNames.end(), sourceName.viewGdiDeviceName) == newlyActiveNames.end())
-			newlyActiveNames.emplace_back(sourceName.viewGdiDeviceName);
 
-		if (path.targetInfo.id == addedDisplay.TargetId &&
+		const auto returnedAdapterMatches =
 			path.targetInfo.adapterId.HighPart == addedDisplay.AdapterLuid.HighPart &&
-			path.targetInfo.adapterId.LowPart == addedDisplay.AdapterLuid.LowPart) {
+			path.targetInfo.adapterId.LowPart == addedDisplay.AdapterLuid.LowPart;
+		if (std::find(newlyActiveNames.begin(), newlyActiveNames.end(), sourceName.viewGdiDeviceName) == newlyActiveNames.end()) {
+			newlyActiveNames.emplace_back(sourceName.viewGdiDeviceName);
+			if (returnedAdapterMatches)
+				newlyActiveNamesOnReturnedAdapter.emplace_back(sourceName.viewGdiDeviceName);
+		}
+
+		if (path.targetInfo.id == addedDisplay.TargetId && returnedAdapterMatches) {
 			wcscpy_s(deviceName, CCHDEVICENAME, sourceName.viewGdiDeviceName);
 			return true;
 		}
 	}
 
-	// Some driver versions reuse or return stale adapter/target identity for
-	// subsequent heads. Display creation is serialized, so one newly active
-	// GDI display name is an unambiguous topology transition even when the
-	// driver's returned identity cannot be matched.
+	// Some driver versions reuse a target ID for subsequent heads. Prefer a
+	// unique newly active display on the returned adapter before considering
+	// the wider Windows topology, which can also change during RDP policy work.
+	if (newlyActiveNamesOnReturnedAdapter.size() == 1) {
+		wcscpy_s(deviceName, CCHDEVICENAME, newlyActiveNamesOnReturnedAdapter.front().c_str());
+		wprintf(
+			L"[SUDOVDA] Matched newly active display %ls on returned adapter despite stale driver target identity.\n",
+			deviceName
+		);
+		return true;
+	}
+
+	// If the adapter identity is also stale, retain the previous fail-closed
+	// fallback only when exactly one display became active system-wide.
 	if (newlyActiveNames.size() == 1) {
 		wcscpy_s(deviceName, CCHDEVICENAME, newlyActiveNames.front().c_str());
 		wprintf(
