@@ -254,12 +254,8 @@ static const bool GetAddedDisplayName(
 	if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr))
 		return 0;
 
+	std::vector<std::wstring> newlyActiveNames;
 	for (const auto& path : paths) {
-		if (path.targetInfo.id != addedDisplay.TargetId ||
-			path.targetInfo.adapterId.HighPart != addedDisplay.AdapterLuid.HighPart ||
-			path.targetInfo.adapterId.LowPart != addedDisplay.AdapterLuid.LowPart)
-			continue;
-
 		DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
 		sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
 		sourceName.header.size = sizeof(DISPLAYCONFIG_SOURCE_DEVICE_NAME);
@@ -269,8 +265,27 @@ static const bool GetAddedDisplayName(
 			continue;
 		if (std::find(namesBeforeAdd.begin(), namesBeforeAdd.end(), sourceName.viewGdiDeviceName) != namesBeforeAdd.end())
 			continue;
+		if (std::find(newlyActiveNames.begin(), newlyActiveNames.end(), sourceName.viewGdiDeviceName) == newlyActiveNames.end())
+			newlyActiveNames.emplace_back(sourceName.viewGdiDeviceName);
 
-		wcscpy_s(deviceName, CCHDEVICENAME, sourceName.viewGdiDeviceName);
+		if (path.targetInfo.id == addedDisplay.TargetId &&
+			path.targetInfo.adapterId.HighPart == addedDisplay.AdapterLuid.HighPart &&
+			path.targetInfo.adapterId.LowPart == addedDisplay.AdapterLuid.LowPart) {
+			wcscpy_s(deviceName, CCHDEVICENAME, sourceName.viewGdiDeviceName);
+			return true;
+		}
+	}
+
+	// Some driver versions reuse or return stale adapter/target identity for
+	// subsequent heads. Display creation is serialized, so one newly active
+	// GDI display name is an unambiguous topology transition even when the
+	// driver's returned identity cannot be matched.
+	if (newlyActiveNames.size() == 1) {
+		wcscpy_s(deviceName, CCHDEVICENAME, newlyActiveNames.front().c_str());
+		wprintf(
+			L"[SUDOVDA] Matched newly active display %ls despite stale driver target identity.\n",
+			deviceName
+		);
 		return true;
 	}
 
