@@ -5,6 +5,7 @@
 #include <initguid.h>
 #include <combaseapi.h>
 #include <thread>
+#include <mutex>
 
 #include <wrl/client.h>
 #include <dxgi.h>
@@ -38,6 +39,82 @@ namespace VDISPLAY {
 // static const GUID DEFAULT_DISPLAY_GUID = { 0xdff7fd29, 0x5b75, 0x41d1, { 0x97, 0x31, 0xb3, 0x2a, 0x17, 0xa1, 0x71, 0x04 } };
 
 HANDLE SUDOVDA_DRIVER_HANDLE = INVALID_HANDLE_VALUE;
+
+struct reserved_virtual_source_t {
+	GUID guid;
+	LUID adapter;
+	UINT32 source_id;
+};
+
+static std::mutex RESERVED_VIRTUAL_SOURCES_MUTEX;
+static std::vector<reserved_virtual_source_t> RESERVED_VIRTUAL_SOURCES;
+
+static bool isVirtualSourceReserved(const LUID& adapter, UINT32 source_id) {
+	std::lock_guard<std::mutex> lock(RESERVED_VIRTUAL_SOURCES_MUTEX);
+	return std::any_of(
+		RESERVED_VIRTUAL_SOURCES.begin(), RESERVED_VIRTUAL_SOURCES.end(),
+		[&adapter, source_id](const reserved_virtual_source_t& reserved) {
+			return reserved.source_id == source_id &&
+				reserved.adapter.HighPart == adapter.HighPart &&
+				reserved.adapter.LowPart == adapter.LowPart;
+		}
+	);
+}
+
+static void releaseVirtualSource(const GUID& guid) {
+	std::lock_guard<std::mutex> lock(RESERVED_VIRTUAL_SOURCES_MUTEX);
+	RESERVED_VIRTUAL_SOURCES.erase(
+		std::remove_if(
+			RESERVED_VIRTUAL_SOURCES.begin(), RESERVED_VIRTUAL_SOURCES.end(),
+			[&guid](const reserved_virtual_source_t& reserved) {
+				return IsEqualGUID(reserved.guid, guid);
+			}
+		),
+		RESERVED_VIRTUAL_SOURCES.end()
+	);
+}
+
+static void reserveActiveVirtualSource(
+	const GUID& guid,
+	const VIRTUAL_DISPLAY_ADD_OUT& allocation,
+	const wchar_t* device_name
+) {
+	UINT path_count = 0;
+	UINT mode_count = 0;
+	if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count))
+		return;
+	std::vector<DISPLAYCONFIG_PATH_INFO> paths(path_count);
+	std::vector<DISPLAYCONFIG_MODE_INFO> modes(mode_count);
+	if (QueryDisplayConfig(
+		QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(),
+		&mode_count, modes.data(), nullptr
+	))
+		return;
+
+	for (const auto& path : paths) {
+		const auto exact_target =
+			path.targetInfo.id == allocation.TargetId &&
+			path.targetInfo.adapterId.HighPart == allocation.AdapterLuid.HighPart &&
+			path.targetInfo.adapterId.LowPart == allocation.AdapterLuid.LowPart;
+		if (!exact_target)
+			continue;
+		DISPLAYCONFIG_SOURCE_DEVICE_NAME source_name = {};
+		source_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+		source_name.header.size = sizeof(source_name);
+		source_name.header.adapterId = path.sourceInfo.adapterId;
+		source_name.header.id = path.sourceInfo.id;
+		if (DisplayConfigGetDeviceInfo(&source_name.header) ||
+			wcscmp(source_name.viewGdiDeviceName, device_name))
+			continue;
+
+		releaseVirtualSource(guid);
+		std::lock_guard<std::mutex> lock(RESERVED_VIRTUAL_SOURCES_MUTEX);
+		RESERVED_VIRTUAL_SOURCES.push_back({guid, path.sourceInfo.adapterId, path.sourceInfo.id});
+		BOOST_LOG(info) << "LoLa reserved virtual display source=" << path.sourceInfo.id
+		                << " for allocation target=" << allocation.TargetId;
+		return;
+	}
+}
 
 // START ISOLATED DISPLAY DECLARATIONS
 struct positionwidthheight;
@@ -743,7 +820,8 @@ std::wstring createVirtualDisplay(
 									active_path.sourceInfo.adapterId.LowPart == path.sourceInfo.adapterId.LowPart;
 							}
 						);
-						if (source_in_use)
+						if (source_in_use ||
+							isVirtualSourceReserved(path.sourceInfo.adapterId, path.sourceInfo.id))
 							continue;
 
 						const auto template_path = std::find_if(
@@ -832,6 +910,7 @@ std::wstring createVirtualDisplay(
 		if (device_name[0] != L'\0') {
 			wprintf(L"[SUDOVDA] Virtual display added successfully: %ls\n", device_name);
 			printf("[SUDOVDA] Configuration: W: %d, H: %d, FPS: %d\n", width, height, fps);
+			reserveActiveVirtualSource(guid, output, device_name);
 			return std::wstring(device_name);
 		}
 
@@ -858,6 +937,7 @@ bool removeVirtualDisplay(const GUID& guid) {
 	}
 
 	if (RemoveVirtualDisplay(SUDOVDA_DRIVER_HANDLE, guid)) {
+		releaseVirtualSource(guid);
 		printf("[SUDOVDA] Virtual display removed successfully.\n");
 		return true;
 	} else {
