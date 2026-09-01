@@ -428,7 +428,7 @@ namespace platf::dxgi {
     }
   }
 
-  int display_base_t::init(const ::video::config_t &config, const std::string &display_name) {
+  int display_base_t::init(const ::video::config_t &config, const std::string &display_name, bool require_duplication) {
     std::once_flag windows_cpp_once_flag;
 
     std::call_once(windows_cpp_once_flag, []() {
@@ -495,7 +495,8 @@ namespace platf::dxgi {
             continue;
           }
 
-          if (desc.AttachedToDesktop && test_dxgi_duplication(adapter_tmp, output_tmp, false)) {
+          if (desc.AttachedToDesktop &&
+              (!require_duplication || test_dxgi_duplication(adapter_tmp, output_tmp, false))) {
             output = std::move(output_tmp);
 
             offset_x = desc.DesktopCoordinates.left;
