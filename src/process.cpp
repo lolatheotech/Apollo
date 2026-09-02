@@ -531,7 +531,19 @@ namespace proc {
       }
 
       const auto primary_name = platf::from_utf8(launch_session->display_name);
-      if (!VDISPLAY::setPrimaryDisplay(primary_name.c_str())) {
+      bool primary_applied = false;
+      for (int attempt = 0; attempt < 40; ++attempt) {
+        if (VDISPLAY::setPrimaryDisplay(primary_name.c_str())) {
+          primary_applied = true;
+          break;
+        }
+        if (attempt == 0 || (attempt + 1) % 10 == 0) {
+          BOOST_LOG(warning) << "LoLa is waiting for monitor slot [0] to accept the Windows primary-display change ["
+                             << launch_session->display_name << "] (attempt " << (attempt + 1) << "/40)";
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+      }
+      if (!primary_applied) {
         BOOST_LOG(error) << "LoLa failed to make monitor slot [0] the Windows primary display ["
                          << launch_session->display_name << ']';
         return 503;
