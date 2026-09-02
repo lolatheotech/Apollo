@@ -531,6 +531,11 @@ namespace proc {
       }
 
       const auto primary_name = platf::from_utf8(launch_session->display_name);
+      if (!VDISPLAY::extendDesktopTopology()) {
+        BOOST_LOG(error) << "LoLa failed to materialize the final extended display topology before primary selection";
+        return 503;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1000));
       bool primary_applied = false;
       for (int attempt = 0; attempt < 40; ++attempt) {
         if (VDISPLAY::setPrimaryDisplay(primary_name.c_str())) {

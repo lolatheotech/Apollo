@@ -472,6 +472,19 @@ static bool getActiveDisplayPosition(const wchar_t* deviceName, POINTL& position
 	return false;
 }
 
+bool extendDesktopTopology() {
+	const auto result = SetDisplayConfig(
+		0, nullptr, 0, nullptr,
+		SDC_APPLY | SDC_TOPOLOGY_EXTEND
+	);
+	if (result != ERROR_SUCCESS) {
+		wprintf(L"[SUDOVDA] Final extended-topology apply failed with error %ld.\n\n", result);
+		return false;
+	}
+	wprintf(L"[SUDOVDA] Final extended-topology apply completed successfully.\n\n");
+	return true;
+}
+
 bool setPrimaryDisplay(const wchar_t* primaryDeviceName) {
 	DEVMODEW primaryDevMode{};
 	int offset_x = 0;
