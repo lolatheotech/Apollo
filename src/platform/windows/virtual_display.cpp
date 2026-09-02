@@ -980,6 +980,24 @@ std::wstring createVirtualDisplay(
 		} else {
 			BOOST_LOG(warning) << "LoLa failed to activate allocated display target=" << output.TargetId
 			                   << " error=" << topology_result;
+
+			// New driver target identities do not always have a saved Windows
+			// topology path. Ask Windows to extend the current desktop once so it
+			// materializes the new IDD head, then resolve it using the fail-closed
+			// newly-active display checks below.
+			const auto extend_result = SetDisplayConfig(
+				0, nullptr, 0, nullptr,
+				SDC_APPLY | SDC_TOPOLOGY_EXTEND
+			);
+			if (extend_result == ERROR_SUCCESS) {
+				BOOST_LOG(info) << "LoLa materialized allocated display target=" << output.TargetId
+				                << " using the Windows extended-topology fallback";
+				topology_result = ERROR_SUCCESS;
+				Sleep(750);
+			} else {
+				BOOST_LOG(warning) << "LoLa extended-topology fallback failed for allocated display target="
+				                   << output.TargetId << " error=" << extend_result;
+			}
 		}
 
 		uint32_t elapsed_ms = 0;
