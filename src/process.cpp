@@ -267,7 +267,7 @@ namespace proc {
       DEVMODEW primary_mode{};
       primary_mode.dmSize = sizeof(primary_mode);
       const auto primary_name = platf::from_utf8(_launch_session->display_name);
-      if (VDISPLAY::getDeviceSettings(primary_name.c_str(), primary_mode) == ERROR_SUCCESS) {
+      if (VDISPLAY::getDeviceSettings(primary_name.c_str(), primary_mode)) {
         const auto x = primary_mode.dmPosition.x + launch_session->monitor_x;
         const auto y = primary_mode.dmPosition.y + launch_session->monitor_y;
         const auto position_result = VDISPLAY::changeDisplayPosition(vdisplay_name.c_str(), x, y);
@@ -529,6 +529,36 @@ namespace proc {
           std::this_thread::sleep_for(std::chrono::milliseconds(750));
         }
       }
+
+      const auto primary_name = platf::from_utf8(launch_session->display_name);
+      if (!VDISPLAY::setPrimaryDisplay(primary_name.c_str())) {
+        BOOST_LOG(error) << "LoLa failed to make monitor slot [0] the Windows primary display ["
+                         << launch_session->display_name << ']';
+        return 503;
+      }
+
+      bool primary_verified = false;
+      for (int attempt = 0; attempt < 40; ++attempt) {
+        const auto active_primary = VDISPLAY::getPrimaryDisplay();
+        DEVMODEW primary_mode{};
+        primary_mode.dmSize = sizeof(primary_mode);
+        if (!active_primary.empty() &&
+            _wcsicmp(active_primary.c_str(), primary_name.c_str()) == 0 &&
+            VDISPLAY::getDeviceSettings(primary_name.c_str(), primary_mode) &&
+            primary_mode.dmPosition.x == 0 &&
+            primary_mode.dmPosition.y == 0) {
+          primary_verified = true;
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+      }
+      if (!primary_verified) {
+        BOOST_LOG(error) << "LoLa could not verify monitor slot [0] as the Windows primary display ["
+                         << launch_session->display_name << ']';
+        return 503;
+      }
+      BOOST_LOG(info) << "LoLa verified monitor slot [0] as Windows primary at [0,0]: "
+                      << launch_session->display_name;
     }
 
 #ifdef _WIN32
