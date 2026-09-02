@@ -435,14 +435,62 @@ std::wstring getPrimaryDisplay() {
 	return primaryDeviceName;
 }
 
+static bool getActiveDisplayPosition(const wchar_t* deviceName, POINTL& position) {
+	UINT32 pathCount = 0;
+	UINT32 modeCount = 0;
+	if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS) {
+		return false;
+	}
+
+	std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+	std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+	if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr) != ERROR_SUCCESS) {
+		return false;
+	}
+
+	for (const auto& path : paths) {
+		DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName{};
+		sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+		sourceName.header.size = sizeof(sourceName);
+		sourceName.header.adapterId = path.sourceInfo.adapterId;
+		sourceName.header.id = path.sourceInfo.id;
+		if (DisplayConfigGetDeviceInfo(&sourceName.header) != ERROR_SUCCESS ||
+		    _wcsicmp(sourceName.viewGdiDeviceName, deviceName) != 0 ||
+		    path.sourceInfo.modeInfoIdx == DISPLAYCONFIG_PATH_MODE_IDX_INVALID ||
+		    path.sourceInfo.modeInfoIdx >= modeCount) {
+			continue;
+		}
+
+		const auto& mode = modes[path.sourceInfo.modeInfoIdx];
+		if (mode.infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE) {
+			continue;
+		}
+		position = mode.sourceMode.position;
+		return true;
+	}
+
+	return false;
+}
+
 bool setPrimaryDisplay(const wchar_t* primaryDeviceName) {
 	DEVMODEW primaryDevMode{};
-	if (!getDeviceSettings(primaryDeviceName, primaryDevMode)) {
-		return false;
-	};
-
-	int offset_x = primaryDevMode.dmPosition.x;
-	int offset_y = primaryDevMode.dmPosition.y;
+	int offset_x = 0;
+	int offset_y = 0;
+	if (getDeviceSettings(primaryDeviceName, primaryDevMode)) {
+		offset_x = primaryDevMode.dmPosition.x;
+		offset_y = primaryDevMode.dmPosition.y;
+	} else {
+		POINTL activePosition{};
+		if (!getActiveDisplayPosition(primaryDeviceName, activePosition)) {
+			wprintf(L"[SUDOVDA] Unable to resolve active position for primary display %ls.\n\n", primaryDeviceName);
+			return false;
+		}
+		primaryDevMode.dmSize = sizeof(DEVMODEW);
+		offset_x = activePosition.x;
+		offset_y = activePosition.y;
+		wprintf(L"[SUDOVDA] Using QueryDisplayConfig position [%ld,%ld] for primary display %ls.\n\n",
+		        offset_x, offset_y, primaryDeviceName);
+	}
 
 	LONG result;
 
