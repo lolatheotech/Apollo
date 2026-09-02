@@ -8,6 +8,7 @@
  #define BOOST_PROCESS_VERSION 1
 #endif
 // standard includes
+#include <algorithm>
 #include <filesystem>
 #include <string>
 #include <thread>
@@ -77,6 +78,33 @@ namespace proc {
     }
   }
 #endif
+
+  bool wait_for_display_capture_ready(const std::string &display_name, uint32_t monitor_index) {
+    constexpr auto retry_interval = std::chrono::milliseconds(250);
+    constexpr auto readiness_timeout = std::chrono::seconds(20);
+    const auto deadline = std::chrono::steady_clock::now() + readiness_timeout;
+    size_t attempt = 0;
+
+    do {
+      ++attempt;
+      const auto capture_ready_displays = platf::display_names(platf::mem_type_e::dxgi);
+      if (std::find(capture_ready_displays.begin(), capture_ready_displays.end(), display_name) != capture_ready_displays.end()) {
+        BOOST_LOG(info) << "LoLa virtual display slot [" << monitor_index << "] at " << display_name
+                        << " is active and DXGI capture-ready after [" << attempt << "] probe(s)";
+        return true;
+      }
+
+      if (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(retry_interval);
+      }
+    } while (std::chrono::steady_clock::now() < deadline);
+
+    BOOST_LOG(error) << "LoLa virtual display slot [" << monitor_index << "] at " << display_name
+                     << " did not become DXGI capture-ready within ["
+                     << std::chrono::duration_cast<std::chrono::seconds>(readiness_timeout).count()
+                     << "] seconds";
+    return false;
+  }
 
   class deinit_t: public platf::deinit_t {
   public:
@@ -255,6 +283,9 @@ namespace proc {
     }
 
     launch_session->display_name = platf::to_utf8(vdisplay_name);
+    if (!wait_for_display_capture_ready(launch_session->display_name, launch_session->monitor_index)) {
+      return 503;
+    }
     _additional_virtual_displays.emplace(
       launch_session->monitor_index,
       std::make_pair(launch_session->display_guid, launch_session->display_name)
@@ -455,6 +486,11 @@ namespace proc {
           this->virtual_display = true;
           this->display_name = platf::to_utf8(vdisplayName);
           launch_session->display_name = this->display_name;
+
+          if (launch_session->monitor_count > 1 &&
+              !wait_for_display_capture_ready(launch_session->display_name, launch_session->monitor_index)) {
+            return 503;
+          }
 
           // When using virtual display, we don't care which display user configured to use.
           // So we always set output_name to the newly created virtual display as a workaround for
