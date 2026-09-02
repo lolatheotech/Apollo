@@ -542,6 +542,9 @@ namespace proc {
           primary_applied = true;
           break;
         }
+        if (!VDISPLAY::extendDesktopTopology()) {
+          BOOST_LOG(warning) << "LoLa could not re-materialize the extended display topology while waiting for monitor slot [0]";
+        }
         if (attempt == 0 || (attempt + 1) % 10 == 0) {
           BOOST_LOG(warning) << "LoLa is waiting for monitor slot [0] to accept the Windows primary-display change ["
                              << launch_session->display_name << "] (attempt " << (attempt + 1) << "/40)";
