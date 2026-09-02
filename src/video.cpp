@@ -4,6 +4,7 @@
  */
 // standard includes
 #include <atomic>
+#include <chrono>
 #include <bitset>
 #include <list>
 #include <mutex>
@@ -1102,6 +1103,37 @@ namespace video {
     }
   }
 
+  std::shared_ptr<platf::display_t> open_configured_display_with_retry(
+    const platf::mem_type_e &type,
+    const std::string &display_name,
+    const config_t &config,
+    uint32_t group_id
+  ) {
+    constexpr auto retry_interval = 250ms;
+    constexpr auto readiness_timeout = 20s;
+    const auto deadline = std::chrono::steady_clock::now() + readiness_timeout;
+    size_t attempt = 0;
+
+    do {
+      ++attempt;
+      if (auto display = platf::display(type, display_name, config)) {
+        BOOST_LOG(info) << "LoLa capture group [" << group_id << "] bound explicitly to "
+                        << display_name << " after [" << attempt << "] attempt(s)";
+        return display;
+      }
+
+      if (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(retry_interval);
+      }
+    } while (std::chrono::steady_clock::now() < deadline);
+
+    BOOST_LOG(error) << "LoLa capture group [" << group_id << "] could not bind explicitly to "
+                     << display_name << " within "
+                     << std::chrono::duration_cast<std::chrono::seconds>(readiness_timeout).count()
+                     << " seconds";
+    return nullptr;
+  }
+
   /**
    * @brief Update the list of display names before or during a stream.
    * @details This will attempt to keep `current_display_index` pointing at the same display.
@@ -1200,8 +1232,20 @@ namespace video {
     std::shared_ptr<platf::display_t> disp;
     const bool coordinated_capture = capture_ctxs.front().config.capture_group_count > 1;
     std::string group_display_name;
+    const bool explicit_group_display =
+      coordinated_capture && !capture_ctxs.front().config.display_name.empty();
     if (!capture_ctxs.front().config.display_name.empty()) {
-      disp = platf::display(encoder.platform_formats->dev_type, capture_ctxs.front().config.display_name, capture_ctxs.front().config);
+      disp = open_configured_display_with_retry(
+        encoder.platform_formats->dev_type,
+        capture_ctxs.front().config.display_name,
+        capture_ctxs.front().config,
+        group_id
+      );
+    }
+    if (!disp && explicit_group_display) {
+      BOOST_LOG(error) << "LoLa capture group [" << group_id
+                       << "] refusing fallback after exact display bind failure";
+      return;
     }
     if (!disp && !coordinated_capture && group_id == 0 && !proc::proc.display_name.empty()) {
       disp = platf::display(encoder.platform_formats->dev_type, proc::proc.display_name, capture_ctxs.front().config);
