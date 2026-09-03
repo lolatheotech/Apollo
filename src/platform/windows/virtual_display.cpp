@@ -45,6 +45,7 @@ struct reserved_virtual_source_t {
 	LUID adapter;
 	UINT32 source_id;
 	UINT32 target_id;
+	std::wstring device_name;
 };
 
 static std::mutex RESERVED_VIRTUAL_SOURCES_MUTEX;
@@ -60,6 +61,49 @@ static bool isVirtualSourceReserved(const LUID& adapter, UINT32 source_id) {
 				reserved.adapter.LowPart == adapter.LowPart;
 		}
 	);
+}
+
+static bool isVirtualSourceReservedByOther(
+	const LUID& adapter, UINT32 source_id, const GUID& guid
+) {
+	std::lock_guard<std::mutex> lock(RESERVED_VIRTUAL_SOURCES_MUTEX);
+	return std::any_of(
+		RESERVED_VIRTUAL_SOURCES.begin(), RESERVED_VIRTUAL_SOURCES.end(),
+		[&adapter, source_id, &guid](const reserved_virtual_source_t& reserved) {
+			return !IsEqualGUID(reserved.guid, guid) &&
+				reserved.source_id == source_id &&
+				reserved.adapter.HighPart == adapter.HighPart &&
+				reserved.adapter.LowPart == adapter.LowPart;
+		}
+	);
+}
+
+static std::vector<std::wstring> getReservedVirtualDisplayNames(const GUID& excluding_guid) {
+	std::lock_guard<std::mutex> lock(RESERVED_VIRTUAL_SOURCES_MUTEX);
+	std::vector<std::wstring> result;
+	for (const auto& reserved : RESERVED_VIRTUAL_SOURCES) {
+		if (IsEqualGUID(reserved.guid, excluding_guid) || reserved.device_name.empty())
+			continue;
+		if (std::find(result.begin(), result.end(), reserved.device_name) == result.end())
+			result.emplace_back(reserved.device_name);
+	}
+	return result;
+}
+
+static void updateReservedVirtualSource(
+	const GUID& guid, const DISPLAYCONFIG_PATH_INFO& path, const std::wstring& device_name
+) {
+	std::lock_guard<std::mutex> lock(RESERVED_VIRTUAL_SOURCES_MUTEX);
+	const auto match = std::find_if(
+		RESERVED_VIRTUAL_SOURCES.begin(), RESERVED_VIRTUAL_SOURCES.end(),
+		[&guid](const reserved_virtual_source_t& reserved) { return IsEqualGUID(reserved.guid, guid); }
+	);
+	if (match == RESERVED_VIRTUAL_SOURCES.end())
+		return;
+	match->adapter = path.targetInfo.adapterId;
+	match->source_id = path.sourceInfo.id;
+	match->target_id = path.targetInfo.id;
+	match->device_name = device_name;
 }
 
 static std::vector<reserved_virtual_source_t> getReservedVirtualSources(const LUID& adapter) {
@@ -125,8 +169,10 @@ std::wstring resolveReservedDisplayName(const GUID& guid) {
 		source_name.header.size = sizeof(source_name);
 		source_name.header.adapterId = path.sourceInfo.adapterId;
 		source_name.header.id = path.sourceInfo.id;
-		if (DisplayConfigGetDeviceInfo(&source_name.header) == ERROR_SUCCESS && source_name.viewGdiDeviceName[0] != L'\0')
+		if (DisplayConfigGetDeviceInfo(&source_name.header) == ERROR_SUCCESS && source_name.viewGdiDeviceName[0] != L'\0') {
+			updateReservedVirtualSource(guid, path, source_name.viewGdiDeviceName);
 			return source_name.viewGdiDeviceName;
+		}
 	}
 
 	return {};
@@ -166,39 +212,44 @@ bool restoreReservedDisplay(
 		if (!(path.flags & DISPLAYCONFIG_PATH_ACTIVE))
 			continue;
 		selected_paths.emplace_back(path);
-		if (path.sourceInfo.id == reserved.source_id &&
-			path.sourceInfo.adapterId.HighPart == reserved.adapter.HighPart &&
-			path.sourceInfo.adapterId.LowPart == reserved.adapter.LowPart &&
-			path.targetInfo.id == reserved.target_id &&
+		if (path.targetInfo.id == reserved.target_id &&
 			path.targetInfo.adapterId.HighPart == reserved.adapter.HighPart &&
-			path.targetInfo.adapterId.LowPart == reserved.adapter.LowPart)
+			path.targetInfo.adapterId.LowPart == reserved.adapter.LowPart) {
+			DISPLAYCONFIG_SOURCE_DEVICE_NAME source_name{};
+			source_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+			source_name.header.size = sizeof(source_name);
+			source_name.header.adapterId = path.sourceInfo.adapterId;
+			source_name.header.id = path.sourceInfo.id;
+			std::wstring active_name;
+			if (DisplayConfigGetDeviceInfo(&source_name.header) == ERROR_SUCCESS && source_name.viewGdiDeviceName[0] != L'\0')
+				active_name = source_name.viewGdiDeviceName;
+			updateReservedVirtualSource(guid, path, active_name);
 			return true;
+		}
 	}
 
 	const auto dormant_path = std::find_if(
 		paths.begin(), paths.end(),
-		[&reserved](const DISPLAYCONFIG_PATH_INFO& path) {
-			return path.sourceInfo.id == reserved.source_id &&
-				path.sourceInfo.adapterId.HighPart == reserved.adapter.HighPart &&
-				path.sourceInfo.adapterId.LowPart == reserved.adapter.LowPart &&
-				path.targetInfo.id == reserved.target_id &&
-				path.targetInfo.adapterId.HighPart == reserved.adapter.HighPart &&
-				path.targetInfo.adapterId.LowPart == reserved.adapter.LowPart;
+		[&reserved, &guid, &selected_paths](const DISPLAYCONFIG_PATH_INFO& path) {
+			if (path.targetInfo.id != reserved.target_id ||
+				path.targetInfo.adapterId.HighPart != reserved.adapter.HighPart ||
+				path.targetInfo.adapterId.LowPart != reserved.adapter.LowPart)
+				return false;
+			const auto source_in_use = std::any_of(
+				selected_paths.begin(), selected_paths.end(),
+				[&path](const DISPLAYCONFIG_PATH_INFO& active) {
+					return active.sourceInfo.id == path.sourceInfo.id &&
+						active.sourceInfo.adapterId.HighPart == path.sourceInfo.adapterId.HighPart &&
+						active.sourceInfo.adapterId.LowPart == path.sourceInfo.adapterId.LowPart;
+				}
+			);
+			return !source_in_use &&
+				!isVirtualSourceReservedByOther(path.sourceInfo.adapterId, path.sourceInfo.id, guid);
 		}
 	);
 	if (dormant_path == paths.end())
 		return false;
 
-	const auto source_in_use = std::any_of(
-		selected_paths.begin(), selected_paths.end(),
-		[&reserved](const DISPLAYCONFIG_PATH_INFO& path) {
-			return path.sourceInfo.id == reserved.source_id &&
-				path.sourceInfo.adapterId.HighPart == reserved.adapter.HighPart &&
-				path.sourceInfo.adapterId.LowPart == reserved.adapter.LowPart;
-		}
-	);
-	if (source_in_use)
-		return false;
 
 	const auto template_path = std::find_if(
 		selected_paths.begin(), selected_paths.end(),
@@ -239,8 +290,11 @@ bool restoreReservedDisplay(
 	if (result != ERROR_SUCCESS)
 		return false;
 	Sleep(500);
-	BOOST_LOG(info) << "LoLa restored reserved primary display target=" << reserved.target_id
-	                << " source=" << reserved.source_id;
+	auto rebound_name = resolveReservedDisplayName(guid);
+	if (rebound_name.empty())
+		return false;
+	BOOST_LOG(info) << "LoLa restored reserved display target=" << reserved.target_id
+	                << " using a free Windows display source as " << rebound_name;
 	return true;
 }
 
@@ -280,7 +334,7 @@ static void reserveActiveVirtualSource(
 		releaseVirtualSource(guid);
 		std::lock_guard<std::mutex> lock(RESERVED_VIRTUAL_SOURCES_MUTEX);
 		RESERVED_VIRTUAL_SOURCES.push_back({
-			guid, path.sourceInfo.adapterId, path.sourceInfo.id, allocation.TargetId
+			guid, path.sourceInfo.adapterId, path.sourceInfo.id, allocation.TargetId, device_name
 		});
 		BOOST_LOG(info) << "LoLa reserved virtual display source=" << path.sourceInfo.id
 		                << " for allocation target=" << allocation.TargetId;
@@ -996,7 +1050,11 @@ std::wstring createVirtualDisplay(
 	constexpr uint32_t enumeration_timeout_ms = 10000;
 
 	for (uint32_t add_attempt = 1; add_attempt <= max_add_attempts; ++add_attempt) {
-		const auto active_names_before_add = GetActiveDisplayNames();
+		auto active_names_before_add = GetActiveDisplayNames();
+		for (const auto& reserved_name : getReservedVirtualDisplayNames(guid)) {
+			if (std::find(active_names_before_add.begin(), active_names_before_add.end(), reserved_name) == active_names_before_add.end())
+				active_names_before_add.emplace_back(reserved_name);
+		}
 		VIRTUAL_DISPLAY_ADD_OUT output{};
 		if (!AddVirtualDisplay(SUDOVDA_DRIVER_HANDLE, width, height, fps, guid, s_client_name, s_client_uid, output)) {
 			BOOST_LOG(error) << "LoLa virtual display driver add failed on attempt [" << add_attempt << '/'

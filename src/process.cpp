@@ -600,6 +600,39 @@ namespace proc {
         }
         primary_name = recreated_primary_name;
         BOOST_LOG(info) << "LoLa recreated monitor slot [0] as final virtual head [" << launch_session->display_name << ']';
+
+        std::vector<std::wstring> verified_names{primary_name};
+        for (auto &[monitor_index, display] : _additional_virtual_displays) {
+          const auto x = static_cast<int32_t>(monitor_index * launch_session->width);
+          if (!VDISPLAY::restoreReservedDisplay(
+                display.first, launch_session->width, launch_session->height, x, 0)) {
+            BOOST_LOG(error) << "LoLa failed to restore monitor slot [" << monitor_index
+                             << "] after recreating monitor slot [0]";
+            return 503;
+          }
+          auto rebound_name = VDISPLAY::resolveReservedDisplayName(display.first);
+          if (rebound_name.empty()) {
+            BOOST_LOG(error) << "LoLa restored monitor slot [" << monitor_index
+                             << "] but could not resolve its exact target";
+            return 503;
+          }
+          const auto duplicate = std::any_of(
+            verified_names.begin(), verified_names.end(),
+            [&rebound_name](const std::wstring& existing_name) {
+              return _wcsicmp(existing_name.c_str(), rebound_name.c_str()) == 0;
+            }
+          );
+          if (duplicate) {
+            BOOST_LOG(error) << "LoLa rejected duplicate Windows display identity ["
+                             << platf::to_utf8(rebound_name) << "] for monitor slot ["
+                             << monitor_index << ']';
+            return 503;
+          }
+          verified_names.emplace_back(rebound_name);
+          display.second = platf::to_utf8(rebound_name);
+          BOOST_LOG(info) << "LoLa rebound monitor slot [" << monitor_index
+                          << "] to unique active display [" << display.second << ']';
+        }
       } else {
         active_primary_name = VDISPLAY::resolveReservedDisplayName(launch_session->display_guid);
         if (!active_primary_name.empty()) {
