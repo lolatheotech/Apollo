@@ -531,6 +531,85 @@ namespace proc {
       }
 
       auto primary_name = platf::from_utf8(launch_session->display_name);
+      auto active_primary_name = VDISPLAY::resolveReservedDisplayName(launch_session->display_guid);
+      if (active_primary_name.empty() &&
+          !VDISPLAY::restoreReservedDisplay(
+            launch_session->display_guid, launch_session->width, launch_session->height, 0, 0)) {
+        BOOST_LOG(warning) << "LoLa reserved monitor slot [0] no longer has a Windows display path; recreating it as the final virtual head";
+
+        if (!VDISPLAY::removeVirtualDisplay(launch_session->display_guid)) {
+          BOOST_LOG(error) << "LoLa failed to remove the stale monitor slot [0] allocation before recreation";
+          return 503;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+        std::string primary_device_name;
+        std::string primary_device_uuid_str;
+        uuid_util::uuid_t primary_device_uuid;
+        if (_app.use_app_identity) {
+          primary_device_name = _app.name;
+          if (_app.per_client_app_identity) {
+            primary_device_uuid = uuid_util::uuid_t::parse(launch_session->unique_id);
+            auto app_uuid = uuid_util::uuid_t::parse(_app.uuid);
+            primary_device_uuid.b64[0] ^= app_uuid.b64[0];
+            primary_device_uuid.b64[1] ^= app_uuid.b64[1];
+            primary_device_uuid_str = primary_device_uuid.string();
+          } else {
+            primary_device_uuid_str = _app.uuid;
+            primary_device_uuid = uuid_util::uuid_t::parse(_app.uuid);
+          }
+        } else {
+          primary_device_name = launch_session->device_name;
+          primary_device_uuid_str = launch_session->unique_id;
+          primary_device_uuid = uuid_util::uuid_t::parse(launch_session->unique_id);
+        }
+        memcpy(&launch_session->display_guid, &primary_device_uuid, sizeof(GUID));
+
+        int primary_target_fps = launch_session->fps ? launch_session->fps : 60000;
+        if (primary_target_fps < 1000) {
+          primary_target_fps *= 1000;
+        }
+        if (config::video.double_refreshrate) {
+          primary_target_fps *= 2;
+        }
+
+        auto recreated_primary_name = VDISPLAY::createVirtualDisplay(
+          primary_device_uuid_str.c_str(),
+          primary_device_name.c_str(),
+          launch_session->width,
+          launch_session->height,
+          primary_target_fps,
+          launch_session->display_guid
+        );
+        if (recreated_primary_name.empty()) {
+          BOOST_LOG(error) << "LoLa failed to recreate monitor slot [0] after Windows discarded its display path";
+          return 503;
+        }
+        VDISPLAY::changeDisplaySettings(
+          recreated_primary_name.c_str(),
+          launch_session->width,
+          launch_session->height,
+          primary_target_fps
+        );
+        this->display_name = platf::to_utf8(recreated_primary_name);
+        launch_session->display_name = this->display_name;
+        config::video.output_name = display_device::map_display_name(this->display_name);
+        if (!wait_for_display_capture_ready(launch_session->display_name, launch_session->monitor_index)) {
+          BOOST_LOG(error) << "LoLa recreated monitor slot [0] but it did not become capture-ready";
+          return 503;
+        }
+        primary_name = recreated_primary_name;
+        BOOST_LOG(info) << "LoLa recreated monitor slot [0] as final virtual head [" << launch_session->display_name << ']';
+      } else {
+        active_primary_name = VDISPLAY::resolveReservedDisplayName(launch_session->display_guid);
+        if (!active_primary_name.empty()) {
+          primary_name = active_primary_name;
+          this->display_name = platf::to_utf8(primary_name);
+          launch_session->display_name = this->display_name;
+          config::video.output_name = display_device::map_display_name(this->display_name);
+        }
+      }
+
       const auto refresh_primary_name = [&]() {
         auto active_name = VDISPLAY::resolveReservedDisplayName(launch_session->display_guid);
         if (active_name.empty()) {
