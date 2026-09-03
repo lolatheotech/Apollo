@@ -226,12 +226,30 @@ namespace proc {
 
     auto existing = _additional_virtual_displays.find(launch_session->monitor_index);
     if (existing != _additional_virtual_displays.end()) {
+      if (!_launch_session) {
+        BOOST_LOG(error) << "LoLa cannot verify secondary monitor slot ["
+                         << launch_session->monitor_index << "] without the primary session";
+        return 503;
+      }
+      const auto x = launch_session->monitor_x - _launch_session->monitor_x;
+      const auto y = launch_session->monitor_y - _launch_session->monitor_y;
+      auto active_name = VDISPLAY::resolveReservedDisplayName(existing->second.first);
+      DEVMODEW mode{};
+      mode.dmSize = sizeof(mode);
+      if (active_name.empty() || !VDISPLAY::getDeviceSettings(active_name.c_str(), mode) ||
+          mode.dmPosition.x != x || mode.dmPosition.y != y ||
+          mode.dmPelsWidth != render_width || mode.dmPelsHeight != render_height) {
+        BOOST_LOG(error) << "LoLa rejected monitor slot [" << launch_session->monitor_index
+                         << "] because its pre-capture topology changed; expected ["
+                         << x << ',' << y << ',' << render_width << 'x' << render_height << ']';
+        return 503;
+      }
       launch_session->virtual_display = true;
       launch_session->display_guid = existing->second.first;
+      existing->second.second = platf::to_utf8(active_name);
       launch_session->display_name = existing->second.second;
-      BOOST_LOG(info) << "LoLa reusing prevalidated virtual display for monitor slot ["
-                      << launch_session->monitor_index << "] at " << launch_session->display_name
-                      << " without mutating the active multimonitor topology";
+      BOOST_LOG(info) << "LoLa verified monitor slot [" << launch_session->monitor_index
+                      << "] on its immutable pre-capture topology at " << launch_session->display_name;
       return 0;
     }
 
@@ -277,9 +295,6 @@ namespace proc {
           return 503;
         }
       }
-    }
-    if (config::video.isolated_virtual_display_option) {
-      VDISPLAY::changeDisplaySettings2(vdisplay_name.c_str(), render_width, render_height, target_fps, true);
     }
 
     launch_session->display_name = platf::to_utf8(vdisplay_name);
@@ -477,7 +492,8 @@ namespace proc {
           }
 
           // Check the ISOLATED DISPLAY configuration setting and rearrange the displays
-          if (config::video.isolated_virtual_display_option == true) {
+          if (config::video.isolated_virtual_display_option == true &&
+              launch_session->monitor_count <= 1) {
             // Apply the isolated display settings
             VDISPLAY::changeDisplaySettings2(vdisplayName.c_str(), render_width, render_height, target_fps, true);
           }
@@ -508,17 +524,27 @@ namespace proc {
 
     if (launch_session->monitor_count > 1 && launch_session->monitor_index == 0) {
       for (uint32_t monitor_index = 1; monitor_index < launch_session->monitor_count; ++monitor_index) {
+        const auto layout = std::find_if(
+          launch_session->monitor_topology.begin(), launch_session->monitor_topology.end(),
+          [monitor_index](const auto& monitor) { return monitor.index == monitor_index; }
+        );
+        if (layout == launch_session->monitor_topology.end()) {
+          BOOST_LOG(error) << "LoLa cannot prepare monitor slot [" << monitor_index
+                           << "] without its declared topology";
+          return 503;
+        }
         auto additional_session = std::make_shared<rtsp_stream::launch_session_t>();
         additional_session->device_name = launch_session->device_name;
         additional_session->unique_id = launch_session->unique_id;
-        additional_session->width = launch_session->width;
-        additional_session->height = launch_session->height;
+        additional_session->width = static_cast<int>(layout->width);
+        additional_session->height = static_cast<int>(layout->height);
         additional_session->fps = launch_session->fps;
         additional_session->scale_factor = launch_session->scale_factor;
         additional_session->monitor_count = launch_session->monitor_count;
         additional_session->monitor_index = monitor_index;
-        additional_session->monitor_x = launch_session->monitor_x + static_cast<int32_t>(monitor_index * launch_session->width);
-        additional_session->monitor_y = launch_session->monitor_y;
+        additional_session->monitor_x = layout->x;
+        additional_session->monitor_y = layout->y;
+        additional_session->monitor_topology = launch_session->monitor_topology;
         if (prepare_additional_virtual_display(additional_session)) {
           BOOST_LOG(error) << "LoLa failed to prepare virtual display for monitor slot [" << monitor_index << ']';
           return 503;
@@ -603,9 +629,17 @@ namespace proc {
 
         std::vector<std::wstring> verified_names{primary_name};
         for (auto &[monitor_index, display] : _additional_virtual_displays) {
-          const auto x = static_cast<int32_t>(monitor_index * launch_session->width);
+          const auto layout = std::find_if(
+            launch_session->monitor_topology.begin(), launch_session->monitor_topology.end(),
+            [monitor_index](const auto& monitor) { return monitor.index == monitor_index; }
+          );
+          if (layout == launch_session->monitor_topology.end()) {
+            return 503;
+          }
+          const auto x = layout->x - launch_session->monitor_x;
+          const auto y = layout->y - launch_session->monitor_y;
           if (!VDISPLAY::restoreReservedDisplay(
-                display.first, launch_session->width, launch_session->height, x, 0)) {
+                display.first, layout->width, layout->height, x, y)) {
             BOOST_LOG(error) << "LoLa failed to restore monitor slot [" << monitor_index
                              << "] after recreating monitor slot [0]";
             return 503;
@@ -722,6 +756,38 @@ namespace proc {
       }
       BOOST_LOG(info) << "LoLa verified monitor slot [0] as Windows primary at [0,0]: "
                       << launch_session->display_name;
+
+      std::vector<VDISPLAY::reserved_display_layout_t> isolated_layouts;
+      for (const auto& layout : launch_session->monitor_topology) {
+        const GUID* guid = nullptr;
+        if (layout.index == 0) {
+          guid = &launch_session->display_guid;
+        } else {
+          const auto display = _additional_virtual_displays.find(layout.index);
+          if (display == _additional_virtual_displays.end()) {
+            BOOST_LOG(error) << "LoLa topology is missing reserved monitor slot [" << layout.index << ']';
+            return 503;
+          }
+          guid = &display->second.first;
+        }
+        isolated_layouts.push_back({
+          *guid,
+          layout.x - launch_session->monitor_x,
+          layout.y - launch_session->monitor_y,
+          layout.width,
+          layout.height
+        });
+      }
+      if (!VDISPLAY::applyReservedDisplayTopology(isolated_layouts)) {
+        BOOST_LOG(error) << "LoLa failed to isolate the host desktop to the reserved virtual displays";
+        return 503;
+      }
+      const auto isolated_primary = VDISPLAY::getPrimaryDisplay();
+      if (isolated_primary.empty() ||
+          _wcsicmp(isolated_primary.c_str(), platf::from_utf8(launch_session->display_name).c_str()) != 0) {
+        BOOST_LOG(error) << "LoLa isolated topology did not retain monitor slot [0] as primary";
+        return 503;
+      }
     }
 
 #ifdef _WIN32
@@ -1159,6 +1225,8 @@ namespace proc {
     }
 
     bool used_virtual_display = vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK && _launch_session && _launch_session->virtual_display;
+    const bool used_multimonitor_virtual_display =
+      used_virtual_display && _launch_session->monitor_count > 1;
     if (used_virtual_display) {
       if (VDISPLAY::removeVirtualDisplay(_launch_session->display_guid)) {
         BOOST_LOG(info) << "Virtual Display removed successfully";
@@ -1177,6 +1245,12 @@ namespace proc {
       }
     }
     _additional_virtual_displays.clear();
+    if (used_multimonitor_virtual_display) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      if (!VDISPLAY::restoreExtendedDesktopTopology()) {
+        BOOST_LOG(warning) << "LoLa could not restore the physical desktop topology after virtual-display teardown";
+      }
+    }
 
     // Only show the Stopped notification if we actually have an app to stop
     // Since terminate() is always run when a new app has started

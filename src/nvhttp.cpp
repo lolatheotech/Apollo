@@ -477,6 +477,65 @@ namespace nvhttp {
     };
     launch_session->monitor_x = parse_monitor_coordinate("lola_monitor_x");
     launch_session->monitor_y = parse_monitor_coordinate("lola_monitor_y");
+    const auto topology_value = get_arg(args, "lola_monitor_topology", "");
+    if (!topology_value.empty()) {
+      try {
+        const auto topology = nlohmann::json::parse(topology_value);
+        if (!topology.is_array() || topology.size() != launch_session->monitor_count) {
+          throw std::out_of_range("monitor topology count");
+        }
+        std::array<bool, video::max_capture_groups> seen_indexes {};
+        uint32_t primary_count = 0;
+        for (const auto& item : topology) {
+          const auto index = item.at("Index").get<int64_t>();
+          const auto x = item.at("X").get<int64_t>();
+          const auto y = item.at("Y").get<int64_t>();
+          const auto width = item.at("Width").get<int64_t>();
+          const auto height = item.at("Height").get<int64_t>();
+          const auto primary = item.at("IsPrimary").get<bool>();
+          if (index < 0 || index >= launch_session->monitor_count ||
+              index >= video::max_capture_groups || seen_indexes[index] ||
+              x < -32768 || x > 32767 || y < -32768 || y > 32767 ||
+              width < 640 || width > 7680 || height < 480 || height > 4320) {
+            throw std::out_of_range("monitor topology entry");
+          }
+          seen_indexes[index] = true;
+          primary_count += primary ? 1U : 0U;
+          launch_session->monitor_topology.push_back({
+            static_cast<uint32_t>(index),
+            static_cast<int32_t>(x),
+            static_cast<int32_t>(y),
+            static_cast<uint32_t>(width),
+            static_cast<uint32_t>(height),
+            primary
+          });
+        }
+        std::sort(
+          launch_session->monitor_topology.begin(), launch_session->monitor_topology.end(),
+          [](const auto& left, const auto& right) { return left.index < right.index; }
+        );
+        if (primary_count != 1 || launch_session->monitor_topology.front().index != 0 ||
+            !launch_session->monitor_topology.front().primary) {
+          throw std::out_of_range("monitor topology primary");
+        }
+        const auto current = std::find_if(
+          launch_session->monitor_topology.begin(), launch_session->monitor_topology.end(),
+          [launch_session](const auto& monitor) {
+            return monitor.index == launch_session->monitor_index;
+          }
+        );
+        if (current == launch_session->monitor_topology.end() ||
+            current->x != launch_session->monitor_x || current->y != launch_session->monitor_y) {
+          throw std::out_of_range("monitor topology current slot");
+        }
+      } catch (const std::exception& error) {
+        BOOST_LOG(warning) << "Rejected invalid LoLa monitor topology: " << error.what();
+        launch_session->monitor_topology.clear();
+      }
+    }
+    if (launch_session->monitor_count > 1 && launch_session->monitor_topology.empty()) {
+      BOOST_LOG(error) << "LoLa multi-monitor launch is missing the complete monitor topology and will fail closed";
+    }
 
     std::stringstream mode;
     if (named_cert_p->display_mode.empty()) {

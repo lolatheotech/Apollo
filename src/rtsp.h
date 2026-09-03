@@ -8,6 +8,7 @@
 #include <atomic>
 #include <memory>
 #include <list>
+#include <vector>
 
 // local includes
 #include "crypto.h"
@@ -24,6 +25,15 @@ namespace stream {
 
 namespace rtsp_stream {
   constexpr auto RTSP_SETUP_PORT = 21;
+
+  struct monitor_layout_t {
+    uint32_t index;
+    int32_t x;
+    int32_t y;
+    uint32_t width;
+    uint32_t height;
+    bool primary;
+  };
 
   struct launch_session_t {
     uint32_t id;
@@ -58,6 +68,7 @@ namespace rtsp_stream {
     uint32_t monitor_count {1};
     int32_t monitor_x {0};
     int32_t monitor_y {0};
+    std::vector<monitor_layout_t> monitor_topology;
 
 
     std::optional<crypto::cipher::gcm_t> rtsp_cipher;

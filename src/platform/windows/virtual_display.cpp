@@ -298,6 +298,120 @@ bool restoreReservedDisplay(
 	return true;
 }
 
+bool applyReservedDisplayTopology(const std::vector<reserved_display_layout_t>& layouts) {
+	if (layouts.empty())
+		return false;
+
+	std::vector<reserved_virtual_source_t> reservations;
+	{
+		std::lock_guard<std::mutex> lock(RESERVED_VIRTUAL_SOURCES_MUTEX);
+		for (const auto& layout : layouts) {
+			const auto match = std::find_if(
+				RESERVED_VIRTUAL_SOURCES.begin(), RESERVED_VIRTUAL_SOURCES.end(),
+				[&layout](const reserved_virtual_source_t& candidate) {
+					return IsEqualGUID(candidate.guid, layout.guid);
+				}
+			);
+			if (match == RESERVED_VIRTUAL_SOURCES.end()) {
+				BOOST_LOG(error) << "LoLa cannot isolate an unreserved virtual display";
+				return false;
+			}
+			reservations.emplace_back(*match);
+		}
+	}
+
+	UINT32 path_count = 0;
+	UINT32 mode_count = 0;
+	if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count) != ERROR_SUCCESS)
+		return false;
+	std::vector<DISPLAYCONFIG_PATH_INFO> paths(path_count);
+	std::vector<DISPLAYCONFIG_MODE_INFO> modes(mode_count);
+	if (QueryDisplayConfig(
+		QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(),
+		&mode_count, modes.data(), nullptr
+	) != ERROR_SUCCESS)
+		return false;
+
+	std::vector<DISPLAYCONFIG_PATH_INFO> selected_paths;
+	for (size_t index = 0; index < layouts.size(); ++index) {
+		const auto& layout = layouts[index];
+		const auto& reserved = reservations[index];
+		const auto match = std::find_if(
+			paths.begin(), paths.begin() + path_count,
+			[&reserved](const DISPLAYCONFIG_PATH_INFO& path) {
+				return path.targetInfo.id == reserved.target_id &&
+					path.targetInfo.adapterId.HighPart == reserved.adapter.HighPart &&
+					path.targetInfo.adapterId.LowPart == reserved.adapter.LowPart;
+			}
+		);
+		if (match == paths.begin() + path_count ||
+			match->sourceInfo.modeInfoIdx == DISPLAYCONFIG_PATH_MODE_IDX_INVALID ||
+			match->sourceInfo.modeInfoIdx >= mode_count) {
+			BOOST_LOG(error) << "LoLa reserved virtual display target=" << reserved.target_id
+			                 << " is not active with a valid source mode";
+			return false;
+		}
+
+		auto path = *match;
+		auto& source_mode = modes[path.sourceInfo.modeInfoIdx];
+		source_mode.sourceMode.position = {layout.x, layout.y};
+		source_mode.sourceMode.width = layout.width;
+		source_mode.sourceMode.height = layout.height;
+		path.flags |= DISPLAYCONFIG_PATH_ACTIVE;
+		selected_paths.emplace_back(path);
+	}
+
+	const auto result = SetDisplayConfig(
+		static_cast<UINT32>(selected_paths.size()), selected_paths.data(),
+		mode_count, modes.data(),
+		SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG
+	);
+	if (result != ERROR_SUCCESS) {
+		BOOST_LOG(error) << "LoLa failed to apply isolated virtual-display topology error=" << result;
+		return false;
+	}
+
+	Sleep(500);
+	UINT32 active_path_count = 0;
+	UINT32 active_mode_count = 0;
+	if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &active_path_count, &active_mode_count) != ERROR_SUCCESS ||
+		active_path_count != layouts.size()) {
+		BOOST_LOG(error) << "LoLa isolated topology verification found " << active_path_count
+		                 << " active paths; expected " << layouts.size();
+		return false;
+	}
+
+	for (const auto& layout : layouts) {
+		const auto display_name = resolveReservedDisplayName(layout.guid);
+		DEVMODEW mode{};
+		mode.dmSize = sizeof(mode);
+		if (display_name.empty() || !getDeviceSettings(display_name.c_str(), mode) ||
+			mode.dmPosition.x != layout.x || mode.dmPosition.y != layout.y ||
+			mode.dmPelsWidth != layout.width || mode.dmPelsHeight != layout.height) {
+			BOOST_LOG(error) << "LoLa isolated topology geometry verification failed";
+			return false;
+		}
+	}
+
+	BOOST_LOG(info) << "LoLa isolated the host desktop to " << layouts.size()
+	                << " reserved virtual display paths";
+	return true;
+}
+
+bool restoreExtendedDesktopTopology() {
+	const auto result = SetDisplayConfig(
+		0, nullptr, 0, nullptr,
+		SDC_APPLY | SDC_TOPOLOGY_EXTEND | SDC_ALLOW_PATH_ORDER_CHANGES
+	);
+	if (result != ERROR_SUCCESS) {
+		BOOST_LOG(error) << "LoLa failed to restore the Windows extended desktop topology error=" << result;
+		return false;
+	}
+	Sleep(500);
+	BOOST_LOG(info) << "LoLa restored the Windows extended desktop topology";
+	return true;
+}
+
 static void reserveActiveVirtualSource(
 	const GUID& guid,
 	const VIRTUAL_DISPLAY_ADD_OUT& allocation,

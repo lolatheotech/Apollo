@@ -22,6 +22,14 @@ namespace VDISPLAY {
 
 	extern HANDLE SUDOVDA_DRIVER_HANDLE;
 
+	struct reserved_display_layout_t {
+		GUID guid;
+		int32_t x;
+		int32_t y;
+		uint32_t width;
+		uint32_t height;
+	};
+
 	LONG getDeviceSettings(const wchar_t* deviceName, DEVMODEW& devMode);
 	LONG changeDisplaySettings(const wchar_t* deviceName, int width, int height, int refresh_rate);
 	LONG changeDisplayPosition(const wchar_t* deviceName, int x, int y);
@@ -31,6 +39,8 @@ namespace VDISPLAY {
 	std::wstring resolveReservedDisplayName(const GUID& guid);
 	bool restoreReservedDisplay(
 		const GUID& guid, uint32_t width, uint32_t height, int32_t x, int32_t y);
+	bool applyReservedDisplayTopology(const std::vector<reserved_display_layout_t>& layouts);
+	bool restoreExtendedDesktopTopology();
 	bool setPrimaryDisplay(const wchar_t* primaryDeviceName);
 	bool getDisplayHDRByName(const wchar_t* displayName);
 	bool setDisplayHDRByName(const wchar_t* displayName, bool enableAdvancedColor);
