@@ -132,6 +132,118 @@ std::wstring resolveReservedDisplayName(const GUID& guid) {
 	return {};
 }
 
+bool restoreReservedDisplay(
+	const GUID& guid, uint32_t width, uint32_t height, int32_t x, int32_t y
+) {
+	reserved_virtual_source_t reserved{};
+	{
+		std::lock_guard<std::mutex> lock(RESERVED_VIRTUAL_SOURCES_MUTEX);
+		const auto match = std::find_if(
+			RESERVED_VIRTUAL_SOURCES.begin(), RESERVED_VIRTUAL_SOURCES.end(),
+			[&guid](const reserved_virtual_source_t& candidate) {
+				return IsEqualGUID(candidate.guid, guid);
+			}
+		);
+		if (match == RESERVED_VIRTUAL_SOURCES.end())
+			return false;
+		reserved = *match;
+	}
+
+	UINT32 path_count = 0;
+	UINT32 mode_count = 0;
+	if (GetDisplayConfigBufferSizes(QDC_ALL_PATHS, &path_count, &mode_count) != ERROR_SUCCESS)
+		return false;
+	std::vector<DISPLAYCONFIG_PATH_INFO> paths(path_count);
+	std::vector<DISPLAYCONFIG_MODE_INFO> modes(mode_count);
+	if (QueryDisplayConfig(
+		QDC_ALL_PATHS, &path_count, paths.data(),
+		&mode_count, modes.data(), nullptr
+	) != ERROR_SUCCESS)
+		return false;
+
+	std::vector<DISPLAYCONFIG_PATH_INFO> selected_paths;
+	for (const auto& path : paths) {
+		if (!(path.flags & DISPLAYCONFIG_PATH_ACTIVE))
+			continue;
+		selected_paths.emplace_back(path);
+		if (path.sourceInfo.id == reserved.source_id &&
+			path.sourceInfo.adapterId.HighPart == reserved.adapter.HighPart &&
+			path.sourceInfo.adapterId.LowPart == reserved.adapter.LowPart &&
+			path.targetInfo.id == reserved.target_id &&
+			path.targetInfo.adapterId.HighPart == reserved.adapter.HighPart &&
+			path.targetInfo.adapterId.LowPart == reserved.adapter.LowPart)
+			return true;
+	}
+
+	const auto dormant_path = std::find_if(
+		paths.begin(), paths.end(),
+		[&reserved](const DISPLAYCONFIG_PATH_INFO& path) {
+			return path.sourceInfo.id == reserved.source_id &&
+				path.sourceInfo.adapterId.HighPart == reserved.adapter.HighPart &&
+				path.sourceInfo.adapterId.LowPart == reserved.adapter.LowPart &&
+				path.targetInfo.id == reserved.target_id &&
+				path.targetInfo.adapterId.HighPart == reserved.adapter.HighPart &&
+				path.targetInfo.adapterId.LowPart == reserved.adapter.LowPart;
+		}
+	);
+	if (dormant_path == paths.end())
+		return false;
+
+	const auto source_in_use = std::any_of(
+		selected_paths.begin(), selected_paths.end(),
+		[&reserved](const DISPLAYCONFIG_PATH_INFO& path) {
+			return path.sourceInfo.id == reserved.source_id &&
+				path.sourceInfo.adapterId.HighPart == reserved.adapter.HighPart &&
+				path.sourceInfo.adapterId.LowPart == reserved.adapter.LowPart;
+		}
+	);
+	if (source_in_use)
+		return false;
+
+	const auto template_path = std::find_if(
+		selected_paths.begin(), selected_paths.end(),
+		[&reserved, &modes](const DISPLAYCONFIG_PATH_INFO& path) {
+			return path.targetInfo.adapterId.HighPart == reserved.adapter.HighPart &&
+				path.targetInfo.adapterId.LowPart == reserved.adapter.LowPart &&
+				path.sourceInfo.modeInfoIdx != DISPLAYCONFIG_PATH_MODE_IDX_INVALID &&
+				path.targetInfo.modeInfoIdx != DISPLAYCONFIG_PATH_MODE_IDX_INVALID &&
+				path.sourceInfo.modeInfoIdx < modes.size() &&
+				path.targetInfo.modeInfoIdx < modes.size();
+		}
+	);
+	if (template_path == selected_paths.end())
+		return false;
+
+	auto restored_path = *dormant_path;
+	auto source_mode = modes[template_path->sourceInfo.modeInfoIdx];
+	auto target_mode = modes[template_path->targetInfo.modeInfoIdx];
+	source_mode.adapterId = restored_path.sourceInfo.adapterId;
+	source_mode.id = restored_path.sourceInfo.id;
+	source_mode.sourceMode.position = {x, y};
+	source_mode.sourceMode.width = width;
+	source_mode.sourceMode.height = height;
+	target_mode.adapterId = restored_path.targetInfo.adapterId;
+	target_mode.id = restored_path.targetInfo.id;
+	restored_path.sourceInfo.modeInfoIdx = static_cast<UINT32>(modes.size());
+	modes.emplace_back(source_mode);
+	restored_path.targetInfo.modeInfoIdx = static_cast<UINT32>(modes.size());
+	modes.emplace_back(target_mode);
+	restored_path.flags |= DISPLAYCONFIG_PATH_ACTIVE;
+	selected_paths.emplace_back(restored_path);
+
+	auto result = SetDisplayConfig(
+		static_cast<UINT32>(selected_paths.size()), selected_paths.data(),
+		static_cast<UINT32>(modes.size()), modes.data(),
+		SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG
+	);
+	if (result != ERROR_SUCCESS)
+		return false;
+	Sleep(500);
+	BOOST_LOG(info) << "LoLa restored reserved primary display target=" << reserved.target_id
+	                << " source=" << reserved.source_id;
+	return true;
+}
+
 static void reserveActiveVirtualSource(
 	const GUID& guid,
 	const VIRTUAL_DISPLAY_ADD_OUT& allocation,

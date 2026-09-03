@@ -532,9 +532,16 @@ namespace proc {
 
       auto primary_name = platf::from_utf8(launch_session->display_name);
       const auto refresh_primary_name = [&]() {
-        const auto active_name = VDISPLAY::resolveReservedDisplayName(launch_session->display_guid);
+        auto active_name = VDISPLAY::resolveReservedDisplayName(launch_session->display_guid);
         if (active_name.empty()) {
-          return;
+          if (!VDISPLAY::restoreReservedDisplay(
+                launch_session->display_guid, launch_session->width, launch_session->height, 0, 0)) {
+            return;
+          }
+          active_name = VDISPLAY::resolveReservedDisplayName(launch_session->display_guid);
+          if (active_name.empty()) {
+            return;
+          }
         }
         if (_wcsicmp(active_name.c_str(), primary_name.c_str()) != 0) {
           BOOST_LOG(info) << "LoLa rebound monitor slot [0] from stale Windows display name ["
