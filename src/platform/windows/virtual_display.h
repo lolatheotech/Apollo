@@ -28,6 +28,7 @@ namespace VDISPLAY {
 	LONG changeDisplaySettings2(const wchar_t* deviceName, int width, int height, int refresh_rate, bool bApplyIsolated=false);	
 	std::wstring getPrimaryDisplay();
 	bool extendDesktopTopology();
+	std::wstring resolveReservedDisplayName(const GUID& guid);
 	bool setPrimaryDisplay(const wchar_t* primaryDeviceName);
 	bool getDisplayHDRByName(const wchar_t* displayName);
 	bool setDisplayHDRByName(const wchar_t* displayName, bool enableAdvancedColor);

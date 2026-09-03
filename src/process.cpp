@@ -530,7 +530,22 @@ namespace proc {
         }
       }
 
-      const auto primary_name = platf::from_utf8(launch_session->display_name);
+      auto primary_name = platf::from_utf8(launch_session->display_name);
+      const auto refresh_primary_name = [&]() {
+        const auto active_name = VDISPLAY::resolveReservedDisplayName(launch_session->display_guid);
+        if (active_name.empty()) {
+          return;
+        }
+        if (_wcsicmp(active_name.c_str(), primary_name.c_str()) != 0) {
+          BOOST_LOG(info) << "LoLa rebound monitor slot [0] from stale Windows display name ["
+                          << launch_session->display_name << "] to active display name ["
+                          << platf::to_utf8(active_name) << ']';
+        }
+        primary_name = active_name;
+        this->display_name = platf::to_utf8(primary_name);
+        launch_session->display_name = this->display_name;
+        config::video.output_name = display_device::map_display_name(this->display_name);
+      };
       if (!VDISPLAY::extendDesktopTopology()) {
         BOOST_LOG(error) << "LoLa failed to materialize the final extended display topology before primary selection";
         return 503;
@@ -538,6 +553,7 @@ namespace proc {
       std::this_thread::sleep_for(std::chrono::milliseconds(1000));
       bool primary_applied = false;
       for (int attempt = 0; attempt < 40; ++attempt) {
+        refresh_primary_name();
         if (VDISPLAY::setPrimaryDisplay(primary_name.c_str())) {
           primary_applied = true;
           break;
@@ -545,6 +561,7 @@ namespace proc {
         if (!VDISPLAY::extendDesktopTopology()) {
           BOOST_LOG(warning) << "LoLa could not re-materialize the extended display topology while waiting for monitor slot [0]";
         }
+        refresh_primary_name();
         if (attempt == 0 || (attempt + 1) % 10 == 0) {
           BOOST_LOG(warning) << "LoLa is waiting for monitor slot [0] to accept the Windows primary-display change ["
                              << launch_session->display_name << "] (attempt " << (attempt + 1) << "/40)";
@@ -559,6 +576,7 @@ namespace proc {
 
       bool primary_verified = false;
       for (int attempt = 0; attempt < 40; ++attempt) {
+        refresh_primary_name();
         const auto active_primary = VDISPLAY::getPrimaryDisplay();
         DEVMODEW primary_mode{};
         primary_mode.dmSize = sizeof(primary_mode);

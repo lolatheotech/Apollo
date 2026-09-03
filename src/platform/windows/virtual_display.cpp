@@ -86,6 +86,52 @@ static void releaseVirtualSource(const GUID& guid) {
 	);
 }
 
+std::wstring resolveReservedDisplayName(const GUID& guid) {
+	reserved_virtual_source_t reserved{};
+	{
+		std::lock_guard<std::mutex> lock(RESERVED_VIRTUAL_SOURCES_MUTEX);
+		const auto match = std::find_if(
+			RESERVED_VIRTUAL_SOURCES.begin(), RESERVED_VIRTUAL_SOURCES.end(),
+			[&guid](const reserved_virtual_source_t& candidate) {
+				return IsEqualGUID(candidate.guid, guid);
+			}
+		);
+		if (match == RESERVED_VIRTUAL_SOURCES.end())
+			return {};
+		reserved = *match;
+	}
+
+	UINT32 path_count = 0;
+	UINT32 mode_count = 0;
+	if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count) != ERROR_SUCCESS)
+		return {};
+
+	std::vector<DISPLAYCONFIG_PATH_INFO> paths(path_count);
+	std::vector<DISPLAYCONFIG_MODE_INFO> modes(mode_count);
+	if (QueryDisplayConfig(
+		QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(),
+		&mode_count, modes.data(), nullptr
+	) != ERROR_SUCCESS)
+		return {};
+
+	for (const auto& path : paths) {
+		if (path.targetInfo.id != reserved.target_id ||
+			path.targetInfo.adapterId.HighPart != reserved.adapter.HighPart ||
+			path.targetInfo.adapterId.LowPart != reserved.adapter.LowPart)
+			continue;
+
+		DISPLAYCONFIG_SOURCE_DEVICE_NAME source_name{};
+		source_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+		source_name.header.size = sizeof(source_name);
+		source_name.header.adapterId = path.sourceInfo.adapterId;
+		source_name.header.id = path.sourceInfo.id;
+		if (DisplayConfigGetDeviceInfo(&source_name.header) == ERROR_SUCCESS && source_name.viewGdiDeviceName[0] != L'\0')
+			return source_name.viewGdiDeviceName;
+	}
+
+	return {};
+}
+
 static void reserveActiveVirtualSource(
 	const GUID& guid,
 	const VIRTUAL_DISPLAY_ADD_OUT& allocation,
