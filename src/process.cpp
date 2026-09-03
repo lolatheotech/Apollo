@@ -568,6 +568,12 @@ namespace proc {
         if (!VDISPLAY::extendDesktopTopology()) {
           BOOST_LOG(warning) << "LoLa could not re-materialize the extended display topology while waiting for monitor slot [0]";
         }
+        if (!VDISPLAY::restoreReservedDisplay(
+              launch_session->display_guid, launch_session->width, launch_session->height, 0, 0)) {
+          BOOST_LOG(warning) << "LoLa could not restore the exact reserved display target while waiting for monitor slot [0]";
+        } else {
+          BOOST_LOG(info) << "LoLa refreshed the exact reserved display target before retrying primary selection";
+        }
         refresh_primary_name();
         if (attempt == 0 || (attempt + 1) % 10 == 0) {
           BOOST_LOG(warning) << "LoLa is waiting for monitor slot [0] to accept the Windows primary-display change ["
