@@ -4,6 +4,7 @@
  */
 // header include
 #include "display_device.h"
+#include "revert_retry_state.h"
 
 // lib includes
 #include <boost/algorithm/string.hpp>
@@ -655,7 +656,7 @@ namespace display_device {
         scheduler_option.m_execution = SchedulerOptions::Execution::ScheduledOnly;
       }
 
-      DD_DATA.sm_instance->schedule([try_once = (option == revert_option_e::try_once), tried_out_devices = std::set<std::string> {}](auto &settings_iface, auto &stop_token) mutable {
+      DD_DATA.sm_instance->schedule([try_once = (option == revert_option_e::try_once), retry_state = RevertRetryState {}](auto &settings_iface, auto &stop_token) mutable {
         if (try_once) {
           std::ignore = settings_iface.revertSettings();
           stop_token.requestStop();
@@ -677,7 +678,7 @@ namespace display_device {
 
           return parsed_devices;
         }()};
-        if (available_devices == tried_out_devices) {
+        if (!retry_state.shouldAttempt(available_devices)) {
           BOOST_LOG(debug) << "Skipping reverting configuration, because no newly added/removed devices were detected since last check. Currently available devices:\n"
                            << toJson(available_devices);
           return;
@@ -688,14 +689,15 @@ namespace display_device {
           stop_token.requestStop();
           return;
         } else if (result == ApiTemporarilyUnavailable) {
-          // Do nothing and retry next time
+          // A previous hard failure must not suppress a transient retry after device churn.
+          retry_state.temporarilyUnavailable();
           return;
         }
 
         // If we have failed to revert settings then we will try to do it next time only if a device was added/removed
         BOOST_LOG(warning) << "Failed to revert display device configuration (will retry once devices are added or removed). Enabling all of the available devices:\n"
                            << toJson(available_devices);
-        tried_out_devices.swap(available_devices);
+        retry_state.failed(available_devices);
       },
                                     scheduler_option);
     }
