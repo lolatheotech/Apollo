@@ -79,7 +79,13 @@ namespace nvhttp {
   static std::chrono::time_point<std::chrono::steady_clock> lola_pairing_creation_time;
   static constexpr std::uint64_t lola_upload_limit = 64ULL * 1024ULL * 1024ULL;
   static std::mutex lola_upload_mutex;
-  static std::unordered_map<std::string, std::pair<fs::path, std::string>> lola_uploads;
+  struct lola_upload_reservation {
+    fs::path dir;
+    std::string owner, session, name, hash;
+    std::uint64_t length;
+    std::chrono::steady_clock::time_point expires;
+  };
+  static std::unordered_map<std::string, lola_upload_reservation> lola_uploads;
   static std::unordered_set<std::string> lola_terminal_uploads;
 
   class SunshineHTTPSServer: public SimpleWeb::ServerBase<SunshineHTTPS> {
@@ -1931,7 +1937,7 @@ namespace nvhttp {
 #endif
   }
 
-  void uploadLolaFile(resp_https_t response, req_https_t request) {
+  void receiveLolaFile(resp_https_t response, req_https_t request, bool prepare) {
     print_req<SunshineHTTPS>(request);
     auto client = get_verified_cert(request);
     auto args = request->parse_query_string();
@@ -1974,7 +1980,7 @@ namespace nvhttp {
       return;
     }
     const auto content = request->content.string();
-    if (declared == 0 || declared > lola_upload_limit || content.size() != declared) {
+    if (declared == 0 || declared > lola_upload_limit || (!prepare && content.size() != declared) || (prepare && !content.empty())) {
       lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "length_rejected");
       return;
     }
@@ -1985,10 +1991,26 @@ namespace nvhttp {
     auto owner = util::hex(crypto::hash(client->uuid)).to_string();
     auto dir = platf::appdata() / "lola-file-transfer-quarantine" / owner / id;
     auto terminal_dir = platf::appdata() / "lola-file-transfer-terminal" / owner / id;
-    {
-      std::lock_guard lock {lola_upload_mutex};
+    // Serialize ownership, file I/O and release with cancellation. A cancel can
+    // win before processing or observe terminal state, never race with delivery.
+    std::unique_lock lock {lola_upload_mutex};
+    auto now = std::chrono::steady_clock::now();
+    if (prepare) {
+      for (auto it = lola_uploads.begin(); it != lola_uploads.end();) {
+        if (it->second.expires <= now) {
+          std::error_code ec;
+          fs::remove_all(it->second.dir, ec);
+          if (ec) { ++it; continue; }
+          lola_terminal_uploads.insert(it->first);
+          it = lola_uploads.erase(it);
+        } else ++it;
+      }
       if (lola_uploads.contains(id) || lola_terminal_uploads.contains(id)) {
         lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "transfer_id_reused");
+        return;
+      }
+      if (lola_uploads.size() >= 64) {
+        lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "transfer_limit");
         return;
       }
       std::error_code ec;
@@ -1997,19 +2019,38 @@ namespace nvhttp {
         lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "transfer_id_reused");
         return;
       }
-      fs::create_directories(dir.parent_path(), ec);
-      if (ec || !fs::create_directory(dir, ec)) {
-        lola_terminal_uploads.insert(id);
-        lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "transfer_id_reused");
+      // Durable reuse protection before acknowledgement; no payload file yet.
+      // Restart fails closed rather than reviving unproved ownership.
+      lola_uploads.emplace(id, lola_upload_reservation {
+        dir, client->uuid, session, name, expected_hash, declared, now + std::chrono::minutes(15)});
+      lola_file_reply(response, SimpleWeb::StatusCode::success_ok, id, "Authorized");
+      return;
+    }
+    auto reserved = lola_uploads.find(id);
+    if (reserved == lola_uploads.end()) {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "unknown_transfer");
+      return;
+    }
+    if (reserved->second.owner != client->uuid || reserved->second.session != session) {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_forbidden, id, "Rejected", "transfer_owner_mismatch");
+      return;
+    }
+    if (reserved->second.expires <= now || reserved->second.name != name ||
+        reserved->second.hash != expected_hash || reserved->second.length != declared) {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "reservation_mismatch");
+      return;
+    }
+    {
+      std::error_code ec;
+      fs::create_directories(dir, ec);
+      if (ec) {
+        lola_file_reply(response, SimpleWeb::StatusCode::server_error_internal_server_error, id, "Failed", "storage_failure");
         return;
       }
-      lola_uploads.emplace(id, std::make_pair(dir, client->uuid));
     }
-
     auto fail = [&](SimpleWeb::StatusCode code, const char *state, const char *reason) {
       std::error_code ec;
       fs::remove_all(dir, ec);
-      std::lock_guard lock {lola_upload_mutex};
       lola_uploads.erase(id);
       lola_terminal_uploads.insert(id);
       lola_file_reply(response, code, id, state, reason);
@@ -2062,7 +2103,6 @@ namespace nvhttp {
     }
     fs::remove_all(dir, ec);
     {
-      std::lock_guard lock {lola_upload_mutex};
       lola_uploads.erase(id);
       lola_terminal_uploads.insert(id);
     }
@@ -2090,28 +2130,29 @@ namespace nvhttp {
       lola_file_reply(response, SimpleWeb::StatusCode::client_error_forbidden, id, "Rejected", "inactive_session");
       return;
     }
-    fs::path dir;
-    {
-      std::lock_guard lock {lola_upload_mutex};
-      auto found = lola_uploads.find(id);
-      if (found == lola_uploads.end()) {
-        lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "unknown_transfer");
-        return;
-      }
-      if (found->second.second != client->uuid) {
-        lola_file_reply(response, SimpleWeb::StatusCode::client_error_forbidden, id, "Rejected", "transfer_owner_mismatch");
-        return;
-      }
-      dir = found->second.first;
-      lola_uploads.erase(found);
-      lola_terminal_uploads.insert(id);
+    if (!lola_safe_id(id)) {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "invalid_transfer_id");
+      return;
+    }
+    std::lock_guard lock {lola_upload_mutex};
+    auto found = lola_uploads.find(id);
+    if (found == lola_uploads.end()) {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_bad_request, id, "Rejected", "unknown_transfer");
+      return;
+    }
+    if (found->second.owner != client->uuid || found->second.session != session) {
+      lola_file_reply(response, SimpleWeb::StatusCode::client_error_forbidden, id, "Rejected", "transfer_owner_mismatch");
+      return;
     }
     std::error_code ec;
-    fs::remove_all(dir, ec);
+    fs::remove_all(found->second.dir, ec);
     if (ec) {
+      // Retain ownership for retry; never acknowledge failed cleanup.
       lola_file_reply(response, SimpleWeb::StatusCode::server_error_internal_server_error, id, "Failed", "cleanup_failure");
       return;
     }
+    lola_uploads.erase(found);
+    lola_terminal_uploads.insert(id);
     BOOST_LOG(info) << "LoLa file transfer [" << id << "] cancelled";
     lola_file_reply(response, SimpleWeb::StatusCode::success_ok, id, "Cancelled");
   }
@@ -2217,7 +2258,8 @@ namespace nvhttp {
     https_server.resource["^/actions/clipboard$"]["GET"] = getClipboard;
     https_server.resource["^/actions/clipboard$"]["POST"] = setClipboard;
     https_server.resource["^/actions/cursor$"]["GET"] = getLolaCursor;
-    https_server.resource["^/actions/files/upload$"]["POST"] = uploadLolaFile;
+    https_server.resource["^/actions/files/upload$"]["POST"] = [](resp_https_t response, req_https_t request) { receiveLolaFile(response, request, false); };
+    https_server.resource["^/actions/files/prepare$"]["POST"] = [](resp_https_t response, req_https_t request) { receiveLolaFile(response, request, true); };
     https_server.resource["^/actions/files/cancel$"]["POST"] = cancelLolaFile;
 
     https_server.config.reuse_address = true;
