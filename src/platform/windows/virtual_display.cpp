@@ -401,7 +401,7 @@ bool applyReservedDisplayTopology(const std::vector<reserved_display_layout_t>& 
 bool restoreExtendedDesktopTopology() {
 	const auto result = SetDisplayConfig(
 		0, nullptr, 0, nullptr,
-		SDC_APPLY | SDC_TOPOLOGY_EXTEND | SDC_ALLOW_PATH_ORDER_CHANGES
+		SDC_APPLY | SDC_TOPOLOGY_EXTEND
 	);
 	if (result != ERROR_SUCCESS) {
 		BOOST_LOG(error) << "LoLa failed to restore the Windows extended desktop topology error=" << result;

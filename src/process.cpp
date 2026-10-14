@@ -699,64 +699,8 @@ namespace proc {
         launch_session->display_name = this->display_name;
         config::video.output_name = display_device::map_display_name(this->display_name);
       };
-      if (!VDISPLAY::extendDesktopTopology()) {
-        BOOST_LOG(error) << "LoLa failed to materialize the final extended display topology before primary selection";
-        return 503;
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-      bool primary_applied = false;
-      for (int attempt = 0; attempt < 40; ++attempt) {
-        refresh_primary_name();
-        if (VDISPLAY::setPrimaryDisplay(primary_name.c_str())) {
-          primary_applied = true;
-          break;
-        }
-        if (!VDISPLAY::extendDesktopTopology()) {
-          BOOST_LOG(warning) << "LoLa could not re-materialize the extended display topology while waiting for monitor slot [0]";
-        }
-        if (!VDISPLAY::restoreReservedDisplay(
-              launch_session->display_guid, launch_session->width, launch_session->height, 0, 0)) {
-          BOOST_LOG(warning) << "LoLa could not restore the exact reserved display target while waiting for monitor slot [0]";
-        } else {
-          BOOST_LOG(info) << "LoLa refreshed the exact reserved display target before retrying primary selection";
-        }
-        refresh_primary_name();
-        if (attempt == 0 || (attempt + 1) % 10 == 0) {
-          BOOST_LOG(warning) << "LoLa is waiting for monitor slot [0] to accept the Windows primary-display change ["
-                             << launch_session->display_name << "] (attempt " << (attempt + 1) << "/40)";
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-      }
-      if (!primary_applied) {
-        BOOST_LOG(error) << "LoLa failed to make monitor slot [0] the Windows primary display ["
-                         << launch_session->display_name << ']';
-        return 503;
-      }
-
-      bool primary_verified = false;
-      for (int attempt = 0; attempt < 40; ++attempt) {
-        refresh_primary_name();
-        const auto active_primary = VDISPLAY::getPrimaryDisplay();
-        DEVMODEW primary_mode{};
-        primary_mode.dmSize = sizeof(primary_mode);
-        if (!active_primary.empty() &&
-            _wcsicmp(active_primary.c_str(), primary_name.c_str()) == 0 &&
-            VDISPLAY::getDeviceSettings(primary_name.c_str(), primary_mode) &&
-            primary_mode.dmPosition.x == 0 &&
-            primary_mode.dmPosition.y == 0) {
-          primary_verified = true;
-          break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-      }
-      if (!primary_verified) {
-        BOOST_LOG(error) << "LoLa could not verify monitor slot [0] as the Windows primary display ["
-                         << launch_session->display_name << ']';
-        return 503;
-      }
-      BOOST_LOG(info) << "LoLa verified monitor slot [0] as Windows primary at [0,0]: "
-                      << launch_session->display_name;
-
+      // Apply the exact reserved topology atomically before verifying primary.
+      // Legacy ChangeDisplaySettingsEx cannot reliably promote these IDD heads.
       std::vector<VDISPLAY::reserved_display_layout_t> isolated_layouts;
       for (const auto& layout : launch_session->monitor_topology) {
         const GUID* guid = nullptr;
@@ -782,6 +726,32 @@ namespace proc {
         BOOST_LOG(error) << "LoLa failed to isolate the host desktop to the reserved virtual displays";
         return 503;
       }
+      refresh_primary_name();
+
+      bool primary_verified = false;
+      for (int attempt = 0; attempt < 40; ++attempt) {
+        refresh_primary_name();
+        const auto active_primary = VDISPLAY::getPrimaryDisplay();
+        DEVMODEW primary_mode{};
+        primary_mode.dmSize = sizeof(primary_mode);
+        if (!active_primary.empty() &&
+            _wcsicmp(active_primary.c_str(), primary_name.c_str()) == 0 &&
+            VDISPLAY::getDeviceSettings(primary_name.c_str(), primary_mode) &&
+            primary_mode.dmPosition.x == 0 &&
+            primary_mode.dmPosition.y == 0) {
+          primary_verified = true;
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+      }
+      if (!primary_verified) {
+        BOOST_LOG(error) << "LoLa could not verify monitor slot [0] as the Windows primary display ["
+                         << launch_session->display_name << ']';
+        return 503;
+      }
+      BOOST_LOG(info) << "LoLa verified monitor slot [0] as Windows primary at [0,0]: "
+                      << launch_session->display_name;
+
       const auto isolated_primary = VDISPLAY::getPrimaryDisplay();
       if (isolated_primary.empty() ||
           _wcsicmp(isolated_primary.c_str(), platf::from_utf8(launch_session->display_name).c_str()) != 0) {
